@@ -50,6 +50,7 @@ import time
 import wave
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from .models import AudioTrack, ClipPlacement, Region
 
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
@@ -313,16 +314,6 @@ def extract_audio_files(data: bytes, top: list) -> List[str]:
     return audio_files
 
 
-class AudioTrack:
-    __slots__ = ("name", "channel_ids")
-
-    def __init__(self, name: str, channel_ids: List[int]):
-        self.name = name
-        self.channel_ids = channel_ids
-
-    def __repr__(self):
-        return f"AudioTrack({self.name!r}, {self.channel_ids})"
-
 
 def read_pt_string(data: bytes, pos: int) -> Tuple[str, int]:
     """
@@ -412,45 +403,6 @@ def extract_audio_tracks(data: bytes, top: list) -> List[AudioTrack]:
                 tracks.append(AudioTrack(name, channel_ids))
 
     return tracks
-
-
-class Region:
-    __slots__ = ("index", "name", "start", "length", "src_offset", "file_index", "wav_file")
-
-    def __init__(self, index, name, start, length, src_offset, file_index=-1):
-        self.index = index
-        self.name = name
-        self.start = start
-        self.length = length
-        self.src_offset = src_offset
-        self.file_index = file_index
-        self.wav_file = ""
-
-
-class ClipPlacement:
-    """A timeline use of a Region definition on one PT channel."""
-    __slots__ = (
-        "region", "track_name", "channel_id", "channel_number",
-        "timeline_start", "raw_start5", "meta"
-    )
-
-    def __init__(
-        self,
-        region: Region,
-        track_name: str,
-        channel_id: int,
-        channel_number: int,
-        timeline_start: int,
-        raw_start5: int,
-        meta: bytes,
-    ):
-        self.region = region
-        self.track_name = track_name
-        self.channel_id = channel_id
-        self.channel_number = channel_number
-        self.timeline_start = timeline_start
-        self.raw_start5 = raw_start5
-        self.meta = meta
 
 
 def extract_regions(data: bytes, top: list) -> List[Region]:

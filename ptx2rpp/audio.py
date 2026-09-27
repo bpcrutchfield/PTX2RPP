@@ -1,11 +1,10 @@
 """Pro Tools audio parsing and media handling."""
 
 from pathlib import Path
-from typing import Dict, List, Tuple
-
-from .models import AudioTrack, Region
-from .ptx import find_by_ct, parse_three_point, r2, r4
-
+from typing import Dict, List, Optional, Tuple
+from .models import AudioTrack, ClipPlacement, Region
+from .ptx import find_by_ct, parse_three_point, r2, r4, r5
+from .timing import ZERO_TICKS
 
 def extract_audio_files(data: bytes, top: list) -> List[str]:
     """
@@ -329,3 +328,334 @@ def match_regions_to_wavs(
                 f"file_index={region.file_index} "
                 f"source={status!r} clip={region.name!r}"
             )
+
+def assign_regions_to_tracks(
+    data: bytes,
+    top: list,
+    tracks: List[AudioTrack],
+    regions: List[Region],
+    session_rate: int,
+    session_timecode_origin_samples: Optional[int] = None,
+    verbose: bool = False,
+) -> Tuple[Dict[str, List[ClipPlacement]], int, int]:
+    """
+    Build actual timeline placements instead of treating Region definitions
+    themselves as timeline clips.
+
+    Each PT channel gets its own REAPER track for now. This is deliberate:
+    PT stereo tracks are stored as paired mono channel maps, and keeping the
+    channels separate is lossless while we continue reverse-engineering the
+    stereo relationship.
+    """
+
+    def debug(*args, **kwargs) -> None:
+        if verbose:
+            print(*args, **kwargs)
+
+    channel_tracks = []
+
+    for logical_index, track in enumerate(tracks):
+        for channel_number, channel_id in enumerate(track.channel_ids):
+            channel_tracks.append({
+                "id": channel_id,
+                "name": track.name,
+                "logical_index": logical_index,
+                "channel_number": channel_number,
+            })
+
+    debug(f"  PT track definitions: {len(tracks)}")
+    debug(f"  PT channel-track entries: {len(channel_tracks)}")
+
+    for i, track in enumerate(channel_tracks):
+        debug(
+            f"    [{i:02d}] id={track['id']} "
+            f"logical={track['logical_index']} "
+            f"channel={track['channel_number']} "
+            f"name='{track['name']}'"
+        )
+
+    # Separate mono channel tracks are the safest representation in REAPER.
+    track_dict: Dict[str, List[ClipPlacement]] = {}
+    region_by_index = {region.index: region for region in regions}
+
+    full_maps = [
+        block for block in top
+        if block[1] == 0x1054
+    ]
+
+    if not full_maps:
+        seen = set()
+        full_maps = []
+
+        for block in find_by_ct(top, 0x1054):
+            if block[3] not in seen:
+                seen.add(block[3])
+                full_maps.append(block)
+
+    debug(f"  PT8+ 0x1054 maps: {len(full_maps)}")
+
+    total_placements = 0
+    inactive_placements_skipped = 0
+    timestamp_positions_corrected = 0
+
+    for map_no, full_map in enumerate(full_maps):
+        map_entries = [
+            child for child in full_map[4]
+            if child[1] == 0x1052
+        ]
+
+        debug(
+            f"  MAP BLOCK #{map_no} "
+            f"offset=0x{full_map[3]:08X}"
+        )
+        debug(f"    0x1052 entries: {len(map_entries)}")
+
+        for count, map_entry in enumerate(map_entries):
+            entry_label, _ = read_pt_string(
+                data,
+                map_entry[3] + 2,
+            )
+
+            if count < len(channel_tracks):
+                channel_track = channel_tracks[count]
+
+                logical_name = channel_track["name"]
+                channel_id = channel_track["id"]
+                channel_number = channel_track["channel_number"]
+
+            else:
+                logical_name = entry_label or f"_map_{count}"
+                channel_id = -1
+                channel_number = count
+
+            suffix = (
+                "L"
+                if channel_number == 0
+                else "R"
+                if channel_number == 1
+                else f"ch{channel_number + 1}"
+            )
+
+            # 0x1052's own label is the playlist/map identity. For ordinary
+            # tracks it normally matches the logical 0x1014 name; for
+            # alternate Pro Tools playlists it carries names such as:
+            #
+            #   Vocals Chorus.01
+            #   Vocals Chorus.02
+            #
+            # Keep that identity instead of replacing it with the parallel
+            # 0x1014 name by array position.
+            mapped_name = (
+                entry_label.strip()
+                if entry_label
+                else logical_name
+            )
+
+            if not mapped_name:
+                mapped_name = logical_name or f"_map_{count}"
+
+            output_track = f"{mapped_name} [{suffix}]"
+
+            track_dict.setdefault(output_track, [])
+
+            placements = [
+                child for child in map_entry[4]
+                if child[1] == 0x1050
+            ]
+
+            debug(
+                f"    ENTRY [{count:02d}] "
+                f"label={entry_label!r} "
+                f"-> '{output_track}' "
+                f"placements={len(placements)}"
+            )
+
+            for placement_no, placement in enumerate(placements):
+
+                # Keep the old fade test only as a diagnostic. The earlier
+                # +46 byte sometimes points beyond the 0x1050 payload, so
+                # this version does not discard a placement on that basis.
+                refs = [
+                    child for child in placement[4]
+                    if child[1] == 0x104F
+                ]
+
+                for ref_no, ref in enumerate(refs):
+                    j = ref[3] + 4
+
+                    if j + 16 > len(data):
+                        continue
+
+                    raw_index = r4(data, j)
+                    raw_start5 = r5(data, j + 5)
+
+                    timeline_start = (
+                        raw_start5 - ZERO_TICKS
+                        if raw_start5 >= ZERO_TICKS
+                        else raw_start5
+                    )
+
+                    region = region_by_index.get(raw_index)
+
+                    if region is None:
+                        debug(
+                            f"      SKIP p={placement_no:02d} "
+                            f"r={ref_no:02d} "
+                            f"unknown region index {raw_index}"
+                        )
+                        continue
+
+                    meta = data[j + 10:j + 16]
+
+                    placement_kind = (
+                        data[j + 13]
+                        if j + 13 < len(data)
+                        else None
+                    )
+
+                    # meta[2] == 0x40 marks the timestamp/original-position
+                    # class observed in Greyscale. For these live placements,
+                    # the visible PT position is reconstructed from the
+                    # region's absolute media timestamp rather than the
+                    # ordinary 0x104F position field:
+                    #
+                    #   region.start
+                    #   - region.src_offset
+                    #   - session TC origin
+                    #
+                    timestamp_positioned = (
+                        len(meta) >= 3
+                        and meta[2] == 0x40
+                    )
+
+                    if (
+                        timestamp_positioned
+                        and session_timecode_origin_samples is not None
+                    ):
+                        timestamp_start = (
+                            region.start
+                            - region.src_offset
+                            - session_timecode_origin_samples
+                        )
+
+                        if timestamp_start >= 0:
+                            debug(
+                                f"      TC40 idx={raw_index:02d} "
+                                f"0x104F="
+                                f"{timeline_start / session_rate:9.3f}s "
+                                f"timestamp="
+                                f"{timestamp_start / session_rate:9.3f}s "
+                                f"name='{region.name}'"
+                            )
+
+                            timeline_start = timestamp_start
+                            timestamp_positions_corrected += 1
+
+                        else:
+                            debug(
+                                f"      TC40 correction rejected "
+                                f"idx={raw_index:02d}: "
+                                f"derived negative position "
+                                f"{timestamp_start / session_rate:.6f}s"
+                            )
+
+                    # PT8+ 0x1050 contains the 0x104F region reference plus a
+                    # one-byte trailing placement-state value.
+                    #
+                    # Reverse engineering across the test sessions shows:
+                    #
+                    #   kind 0x03 + state 0x00 -> live timeline clip
+                    #   kind 0x03 + state 0x01 -> stale/inactive reference
+                    #
+                    placement_state_pos = (
+                        placement[3]
+                        + placement[2]
+                        - 1
+                    )
+
+                    placement_state = (
+                        data[placement_state_pos]
+                        if 0 <= placement_state_pos < len(data)
+                        else None
+                    )
+
+                    # j+13 separates the main live/aux reference classes.
+                    if placement_kind != 0x03:
+                        debug(
+                            f"      AUX  p={placement_no:02d} "
+                            f"idx={raw_index:02d} "
+                            f"kind=0x{placement_kind:02X} "
+                            f"state={placement_state!r} "
+                            f"at="
+                            f"{timeline_start / session_rate:9.3f}s "
+                            f"name='{region.name}'"
+                        )
+                        continue
+
+                    # A 0x03 reference with trailing state 0x01 is not a live
+                    # timeline clip.
+                    if placement_state == 0x01:
+                        inactive_placements_skipped += 1
+
+                        debug(
+                            f"      INACTIVE "
+                            f"p={placement_no:02d} "
+                            f"idx={raw_index:02d} "
+                            f"kind=0x03 state=0x01 "
+                            f"at="
+                            f"{timeline_start / session_rate:9.3f}s "
+                            f"name='{region.name}'"
+                        )
+
+                        continue
+
+                    clip_placement = ClipPlacement(
+                        region=region,
+                        track_name=mapped_name,
+                        channel_id=channel_id,
+                        channel_number=channel_number,
+                        timeline_start=timeline_start,
+                        raw_start5=raw_start5,
+                        meta=meta,
+                    )
+
+                    track_dict[output_track].append(
+                        clip_placement
+                    )
+
+                    total_placements += 1
+
+                    debug(
+                        f"      CLIP p={placement_no:02d} "
+                        f"idx={raw_index:02d} "
+                        f"at="
+                        f"{timeline_start / session_rate:9.3f}s "
+                        f"len="
+                        f"{region.length / session_rate:8.3f}s "
+                        f"name='{region.name}'"
+                    )
+
+    for placements in track_dict.values():
+        placements.sort(
+            key=lambda placement: placement.timeline_start
+        )
+
+    debug()
+    debug(
+        f"  Active timeline placements created: "
+        f"{total_placements}"
+    )
+    debug(
+        f"  Inactive/stale 0x03 placements skipped: "
+        f"{inactive_placements_skipped}"
+    )
+    debug(
+        "  Region definitions not referenced by the active map "
+        "are intentionally not written to the RPP."
+    )
+
+    return (
+        track_dict,
+        inactive_placements_skipped,
+        timestamp_positions_corrected,
+    )

@@ -79,8 +79,12 @@ from .timing import (
 )
 
 from .audio import (
+    build_registered_media_map,
+    build_wav_index,
     extract_audio_files,
     extract_audio_tracks,
+    extract_regions,
+    match_regions_to_wavs,
     read_pt_string,
 )
 
@@ -187,149 +191,6 @@ def resolve_session_input(
     length  = rle(base + offsetbytes, lengthbytes)
     start   = rle(base + offsetbytes + lengthbytes, startbytes)
     return src_off, length, start
-
-
-
-
-def extract_regions(data: bytes, top: list) -> List[Region]:
-    """
-    Extract audio regions in exactly the order used by libptformat.
-
-    This detail is critical: 0x104F placement records refer to regions by
-    their sequential index.  A recursive search for every 0x2629 block can
-    change that ordering (and can include blocks outside the actual region
-    list), causing perfectly valid indexes to resolve to the wrong region.
-
-    libptformat only indexes direct 0x1008/0x2629 children of top-level
-    0x100B/0x262A audio-region-list blocks.
-    """
-    regions: List[Region] = []
-
-    region_lists = [
-        b for b in top
-        if b[1] in (0x100B, 0x262A)
-    ]
-
-    debug(f"  Audio region-list blocks: {len(region_lists)}")
-
-    for region_list in region_lists:
-        for block in region_list[4]:
-            if block[1] not in (0x1008, 0x2629):
-                continue
-
-            j = block[3] + 11
-            if j + 4 > len(data):
-                continue
-
-            name, j_after_name = read_pt_string(data, j)
-            if not name:
-                continue
-
-            # This mirrors ptformat:
-            #   j = c->offset + 11
-            #   regionname = parsestring(j)
-            #   j += regionname.size() + 4
-            #   r.index = rindex
-            #   parse_region_info(j, *d, r)
-            #
-            # Our parse_three_point() reads the same timing triple.
-            j = j_after_name
-            src_off, length, start = parse_three_point(data, j)
-
-            if length <= 0:
-                continue
-
-            # libptformat does NOT infer the source file from the region
-            # name.  The source WAV index is stored immediately after the
-            # region's first child block:
-            #
-            #   findex = read4(child.offset + child.block_size)
-            #
-            file_index = -1
-            if block[4]:
-                source_child = block[4][0]
-                findex_pos = source_child[3] + source_child[2]
-                if findex_pos + 4 <= len(data):
-                    file_index = r4(data, findex_pos)
-
-            region_index = len(regions)
-            regions.append(
-                Region(
-                    region_index,
-                    name,
-                    start,
-                    length,
-                    src_off,
-                    file_index,
-                )
-            )
-
-    return regions
-
-
-def build_wav_index(audio_dir: Path) -> Dict[str, str]:
-    """stem → full path for every wav file on disk."""
-    index = {}
-    for f in audio_dir.iterdir():
-        if f.suffix.lower() in (".wav", ".aif", ".aiff"):
-            index[f.stem.lower()] = str(f)
-    return index
-
-
-def _normalise_media_name(name: str) -> str:
-    """Normalise a PT registered media name to a disk stem."""
-    name = Path(name.replace("\\", "/")).name
-    return Path(name).stem.lower().strip()
-
-
-def build_registered_media_map(
-    registered_audio_files: List[str],
-    wav_index: Dict[str, str],
-) -> Dict[int, str]:
-    """
-    Map Pro Tools' registered audio-file indexes to real files on disk.
-
-    This is the important distinction that earlier versions missed:
-    region names are edit/clip names; they are not necessarily media names.
-    """
-    result: Dict[int, str] = {}
-
-    for i, registered in enumerate(registered_audio_files):
-        key = _normalise_media_name(registered)
-        path = wav_index.get(key)
-
-        if path is None:
-            # Conservative case-insensitive prefix fallback for extension/
-            # naming differences, but still driven by the PT media name.
-            candidates = [
-                p for stem, p in wav_index.items()
-                if stem == key or stem.startswith(key) or key.startswith(stem)
-            ]
-            if len(candidates) == 1:
-                path = candidates[0]
-
-        if path:
-            result[i] = path
-            debug(f"    MEDIA [{i}] {registered!r} -> {Path(path).name!r}")
-        else:
-            debug(f"    MEDIA [{i}] {registered!r} -> NOT FOUND")
-
-    return result
-
-
-def match_regions_to_wavs(
-    regions: List[Region],
-    registered_media_map: Dict[int, str],
-):
-    """Attach each Region to its real PT source file by file index."""
-    for r in regions:
-        r.wav_file = registered_media_map.get(r.file_index, "")
-        status = Path(r.wav_file).name if r.wav_file else "NOT FOUND"
-        debug(
-            f"    REGION [{r.index:02d}] file_index={r.file_index} "
-            f"source={status!r} clip={r.name!r}"
-        )
-
 
 
 def extract_session_timecode_origin_samples(
@@ -2296,8 +2157,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # ── Audio ──────────────────────────────────────────────────────────
         registered_audio = extract_audio_files(data, top)
         audio_track_defs = extract_audio_tracks(data, top)
-        regions = extract_regions(data, top)
-
+        regions = extract_regions(
+            data,
+            top,
+            verbose=VERBOSE,
+        )
         if audio_dir.is_dir():
             media_index = build_wav_index(audio_dir)
         else:
@@ -2309,11 +2173,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
 
         registered_media = build_registered_media_map(
-            registered_audio,
-            media_index,
+        registered_audio,
+        media_index,
+        verbose=VERBOSE,
         )
-        match_regions_to_wavs(regions, registered_media)
-
+        match_regions_to_wavs(
+            regions,
+            registered_media,
+            verbose=VERBOSE,
+        )
         session_tc_origin_samples, session_tc_rate_enum, session_tc_origin_frames = (
             extract_session_timecode_origin_samples(data, top, sample_rate)
         )

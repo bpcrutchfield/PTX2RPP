@@ -1,9 +1,10 @@
 """Pro Tools audio parsing and media handling."""
 
-from typing import List, Tuple
+from pathlib import Path
+from typing import Dict, List, Tuple
 
-from .models import AudioTrack
-from .ptx import find_by_ct, r2, r4
+from .models import AudioTrack, Region
+from .ptx import find_by_ct, parse_three_point, r2, r4
 
 
 def extract_audio_files(data: bytes, top: list) -> List[str]:
@@ -158,3 +159,173 @@ def extract_audio_tracks(data: bytes, top: list) -> List[AudioTrack]:
                 tracks.append(AudioTrack(name, channel_ids))
 
     return tracks
+
+
+def extract_regions(
+    data: bytes,
+    top: list,
+    verbose: bool = False,
+) -> List[Region]:
+    """
+    Extract audio regions in exactly the order used by libptformat.
+
+    This detail is critical: 0x104F placement records refer to regions by
+    their sequential index. A recursive search for every 0x2629 block can
+    change that ordering (and can include blocks outside the actual region
+    list), causing perfectly valid indexes to resolve to the wrong region.
+
+    libptformat only indexes direct 0x1008/0x2629 children of top-level
+    0x100B/0x262A audio-region-list blocks.
+    """
+    regions: List[Region] = []
+
+    region_lists = [
+        b for b in top
+        if b[1] in (0x100B, 0x262A)
+    ]
+
+    if verbose:
+        print(f"  Audio region-list blocks: {len(region_lists)}")
+
+    for region_list in region_lists:
+        for block in region_list[4]:
+            if block[1] not in (0x1008, 0x2629):
+                continue
+
+            j = block[3] + 11
+            if j + 4 > len(data):
+                continue
+
+            name, j_after_name = read_pt_string(data, j)
+            if not name:
+                continue
+
+            # This mirrors ptformat:
+            #   j = c->offset + 11
+            #   regionname = parsestring(j)
+            #   j += regionname.size() + 4
+            #   r.index = rindex
+            #   parse_region_info(j, *d, r)
+            #
+            # Our parse_three_point() reads the same timing triple.
+            j = j_after_name
+            src_off, length, start = parse_three_point(data, j)
+
+            if length <= 0:
+                continue
+
+            # libptformat does NOT infer the source file from the region
+            # name. The source WAV index is stored immediately after the
+            # region's first child block:
+            #
+            #   findex = read4(child.offset + child.block_size)
+            #
+            file_index = -1
+            if block[4]:
+                source_child = block[4][0]
+                findex_pos = source_child[3] + source_child[2]
+
+                if findex_pos + 4 <= len(data):
+                    file_index = r4(data, findex_pos)
+
+            region_index = len(regions)
+
+            regions.append(
+                Region(
+                    region_index,
+                    name,
+                    start,
+                    length,
+                    src_off,
+                    file_index,
+                )
+            )
+
+    return regions
+
+
+def build_wav_index(audio_dir: Path) -> Dict[str, str]:
+    """stem → full path for every wav file on disk."""
+    index = {}
+
+    for f in audio_dir.iterdir():
+        if f.suffix.lower() in (".wav", ".aif", ".aiff"):
+            index[f.stem.lower()] = str(f)
+
+    return index
+
+
+def _normalise_media_name(name: str) -> str:
+    """Normalise a PT registered media name to a disk stem."""
+    name = Path(name.replace("\\", "/")).name
+    return Path(name).stem.lower().strip()
+
+
+def build_registered_media_map(
+    registered_audio_files: List[str],
+    wav_index: Dict[str, str],
+    verbose: bool = False,
+) -> Dict[int, str]:
+    """
+    Map Pro Tools' registered audio-file indexes to real files on disk.
+
+    This is the important distinction that earlier versions missed:
+    region names are edit/clip names; they are not necessarily media names.
+    """
+    result: Dict[int, str] = {}
+
+    for i, registered in enumerate(registered_audio_files):
+        key = _normalise_media_name(registered)
+        path = wav_index.get(key)
+
+        if path is None:
+            # Conservative case-insensitive prefix fallback for extension/
+            # naming differences, but still driven by the PT media name.
+            candidates = [
+                p for stem, p in wav_index.items()
+                if stem == key or stem.startswith(key) or key.startswith(stem)
+            ]
+
+            if len(candidates) == 1:
+                path = candidates[0]
+
+        if path:
+            result[i] = path
+
+            if verbose:
+                print(
+                    f"    MEDIA [{i}] {registered!r} -> "
+                    f"{Path(path).name!r}"
+                )
+
+        elif verbose:
+            print(f"    MEDIA [{i}] {registered!r} -> NOT FOUND")
+
+    return result
+
+
+def match_regions_to_wavs(
+    regions: List[Region],
+    registered_media_map: Dict[int, str],
+    verbose: bool = False,
+) -> None:
+    """Attach each Region to its real PT source file by file index."""
+
+    for region in regions:
+        region.wav_file = registered_media_map.get(
+            region.file_index,
+            "",
+        )
+
+        if verbose:
+            status = (
+                Path(region.wav_file).name
+                if region.wav_file
+                else "NOT FOUND"
+            )
+
+            print(
+                f"    REGION [{region.index:02d}] "
+                f"file_index={region.file_index} "
+                f"source={status!r} clip={region.name!r}"
+            )

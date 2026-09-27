@@ -3,16 +3,7 @@
 from typing import List
 
 from .ptx import r2, r4, r5
-
-
-ZERO_TICKS = 0xE8D4A51000
-PT_MIDI_TICKS_PER_QN = 960000
-
-
-def _ptticks_to_seconds(value: int, bpm: float) -> float:
-    """Convert Pro Tools musical ticks to seconds."""
-    return (value / PT_MIDI_TICKS_PER_QN) * (60.0 / bpm)
-
+from .timing import ZERO_TICKS, ptticks_to_seconds
 
 def extract_memory_locations(
     data: bytes,
@@ -116,9 +107,9 @@ def extract_memory_locations(
                 else raw_ticks
             )
 
-            position_seconds = _ptticks_to_seconds(
-                timeline_ticks,
-                tempo_bpm,
+            position_seconds = ptticks_to_seconds(
+           timeline_ticks,
+            tempo_bpm,
             )
 
             timebase = "ticks"

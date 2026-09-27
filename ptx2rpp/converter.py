@@ -70,13 +70,18 @@ from .ptx import (
 )
 from .markers import extract_memory_locations
 
+from .timing import (
+    PT_MIDI_TICKS_PER_QN,
+    RPP_PPQ,
+    ZERO_TICKS,
+    ptticks_to_rpp_ppq,
+    ptticks_to_seconds,
+)
+
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
 DEFAULT_SAMPLE_RATE = 44100
 
-ZERO_TICKS = 0xE8D4A51000
-PT_MIDI_TICKS_PER_QN = 960000
-RPP_PPQ = 960
 
 TRACK_COLOURS = [
     0x0094FF, 0xFF6B35, 0x00C853, 0xFF1744, 0xAA00FF,
@@ -1232,14 +1237,6 @@ def extract_session_tempo(data: bytes, top: list) -> float:
     return float(bpm)
 
 
-def _ptticks_to_seconds(v: int, bpm: float) -> float:
-    # PT MIDI timebase: 960,000 ticks per quarter note.
-    # One quarter note lasts 60 / BPM seconds.
-    return (v / PT_MIDI_TICKS_PER_QN) * (60.0 / bpm)
-
-
-def _ptticks_to_rpp_ppq(v: int) -> int:
-    return int(round(v * RPP_PPQ / PT_MIDI_TICKS_PER_QN))
 
 
 def _midi_source_events(
@@ -1254,8 +1251,8 @@ def _midi_source_events(
     """
     events = []
     for n in notes:
-        start = _ptticks_to_rpp_ppq(n.pos)
-        end = _ptticks_to_rpp_ppq(n.pos + n.length)
+        start = ptticks_to_rpp_ppq(n.pos)
+        end = ptticks_to_rpp_ppq(n.pos + n.length)
         vel = max(1, min(127, n.velocity))
         pitch = max(0, min(127, n.note))
         events.append((start, 0x90, pitch, vel, 1))
@@ -2272,7 +2269,7 @@ def write_rpp(
             item_counter += 1
             midi_written += 1
 
-            absolute_seconds = _ptticks_to_seconds(
+            absolute_seconds = ptticks_to_seconds(
                 placement.timeline_ticks, tempo_bpm
             )
             position_seconds = max(0.0, absolute_seconds - origin_seconds)
@@ -2281,7 +2278,7 @@ def write_rpp(
                 int(meta["length"]),
                 PT_MIDI_TICKS_PER_QN // 64,
             )
-            length_seconds = _ptticks_to_seconds(length_ticks, tempo_bpm)
+            length_seconds = ptticks_to_seconds(length_ticks, tempo_bpm)
 
             item_key = (
                 f"MIDI|{track_name}|{placement.region_index}|"
@@ -2518,7 +2515,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             ]
             if midi_starts:
                 tempo_for_origin = extract_session_tempo(data, top)
-                origin_seconds = _ptticks_to_seconds(
+                origin_seconds = ptticks_to_seconds(
                     min(midi_starts),
                     tempo_for_origin,
                 )

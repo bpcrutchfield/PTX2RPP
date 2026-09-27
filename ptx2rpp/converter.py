@@ -50,7 +50,15 @@ import time
 import wave
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from .models import AudioTrack, ClipPlacement, Region
+from .models import (
+    AudioTrack,
+    ClipPlacement,
+    MidiNote,
+    MidiPlacement,
+    MidiRegionData,
+    PlaylistLaneGroup,
+    Region,
+)
 from .ptx import (
     decrypt_ptx,
     find_by_ct,
@@ -60,6 +68,7 @@ from .ptx import (
     r4,
     r5,
 )
+from .markers import extract_memory_locations
 
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
@@ -465,139 +474,6 @@ def match_regions_to_wavs(
             f"source={status!r} clip={r.name!r}"
         )
 
-
-def extract_memory_locations(
-    data: bytes,
-    sample_rate: int,
-    tempo_bpm: float,
-) -> List[dict]:
-    """
-    Extract verified Pro Tools point Memory Locations from 0x2077 blocks.
-
-    Two timestamp encodings are present in the PTX corpus used by PTX2RPP:
-
-      03 09 00 00
-        Absolute UInt64 sample position.
-        Verified in Greyscale and Getting Away With Murder.
-
-      01 09 00 00
-        Five-byte Pro Tools musical-tick position, using ZERO_TICKS.
-        Verified in Headrush and Silent Longing.
-
-    Pro Tools stores the marker catalogue twice in the tested sessions, so
-    exact (index, name, position) duplicates are collapsed.
-
-    Selection/range Memory Locations and unknown 0x2077 layouts are deliberately
-    ignored until their structure is verified.
-    """
-    found = []
-    seen = set()
-
-    # Marker blocks can live inside a PTX envelope that the generic tree parser
-    # does not always expose cleanly.  Use the same strict raw-envelope strategy
-    # as the session-timecode-origin reader.
-    for pos in range(0x14, len(data) - 24):
-        if data[pos] != 0x5A:
-            continue
-
-        bt = r2(data, pos + 1)
-        bs = r4(data, pos + 3)
-        ct = r2(data, pos + 7)
-
-        if ct != 0x2077 or bt != 0x000C:
-            continue
-        if bs < 24 or bs > 0x10000:
-            continue
-        if pos + 7 + bs > len(data):
-            continue
-
-        q = pos + 9  # payload immediately after the 0x2077 content type
-        if q + 10 > len(data):
-            continue
-
-        marker_index = r2(data, q)
-        layout = data[q + 2:q + 6]
-        name_len = r4(data, q + 6)
-
-        if marker_index <= 0 or marker_index > 0xFFFF:
-            continue
-        if name_len > 4096:
-            continue
-
-        name_start = q + 10
-        name_end = name_start + name_len
-        if name_end + 8 > pos + 7 + bs:
-            continue
-
-        try:
-            name = data[name_start:name_end].decode("utf-8")
-        except UnicodeDecodeError:
-            name = data[name_start:name_end].decode("utf-8", "replace")
-
-        time_pos = name_end
-
-        if layout == b"\x03\x09\x00\x00":
-            # Sample-based Memory Location.
-            raw_samples = int.from_bytes(
-                data[time_pos:time_pos + 8],
-                byteorder="little",
-                signed=True,
-            )
-            if raw_samples < 0:
-                continue
-            position_seconds = raw_samples / float(sample_rate)
-            timebase = "samples"
-
-        elif layout == b"\x01\x09\x00\x00":
-            # Musical-tick Memory Location.  The meaningful timestamp is the
-            # first five bytes; the remaining bytes belong to the PT marker
-            # record rather than an ordinary UInt64 sample count.
-            raw_ticks = r5(data, time_pos)
-            timeline_ticks = (
-                raw_ticks - ZERO_TICKS
-                if raw_ticks >= ZERO_TICKS
-                else raw_ticks
-            )
-            position_seconds = _ptticks_to_seconds(
-                timeline_ticks,
-                tempo_bpm,
-            )
-            timebase = "ticks"
-
-        else:
-            debug(
-                f"  [marker] ignored unverified 0x2077 layout "
-                f"{layout.hex(' ')} at 0x{pos:X}"
-            )
-            continue
-
-        identity = (
-            marker_index,
-            name,
-            round(position_seconds, 9),
-        )
-        if identity in seen:
-            continue
-        seen.add(identity)
-
-        found.append(
-            {
-                "index": marker_index,
-                "name": name,
-                "position_seconds": position_seconds,
-                "timebase": timebase,
-                "block_offset": pos,
-            }
-        )
-
-    found.sort(
-        key=lambda m: (
-            m["position_seconds"],
-            m["index"],
-            m["name"],
-        )
-    )
-    return found
 
 
 def extract_session_timecode_origin_samples(
@@ -1180,30 +1056,6 @@ def prune_spurious_cross_track_audio(
     return removed
 
 
-class MidiNote:
-    __slots__ = ("pos", "note", "length", "velocity")
-    def __init__(self, pos, note, length, velocity):
-        self.pos = int(pos)
-        self.note = int(note)
-        self.length = int(length)
-        self.velocity = int(velocity)
-
-
-class MidiRegionData:
-    __slots__ = ("index", "name", "notes", "length")
-    def __init__(self, index, name, notes):
-        self.index = index
-        self.name = name
-        self.notes = notes
-        self.length = max((n.pos + n.length for n in notes), default=0)
-
-
-class MidiPlacement:
-    __slots__ = ("track_name", "region_index", "timeline_ticks")
-    def __init__(self, track_name, region_index, timeline_ticks):
-        self.track_name = track_name
-        self.region_index = int(region_index)
-        self.timeline_ticks = int(timeline_ticks)
 
 
 def extract_midi_event_chunks(data: bytes, top: list) -> List[MidiRegionData]:
@@ -1955,14 +1807,6 @@ def heal_short_audio_item_lengths(
 
 
 
-class PlaylistLaneGroup:
-    __slots__ = ("track_name", "lanes")
-
-    def __init__(self, track_name: str):
-        self.track_name = track_name
-        self.lanes = []  # list[(lane_name, placements, is_active)]
-
-
 def _split_output_track_name(name: str) -> Tuple[str, str]:
     """
     'Vocals Chorus.03 [L]' -> ('Vocals Chorus.03', ' [L]')
@@ -2691,7 +2535,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             data,
             sample_rate,
             tempo_bpm,
-        )
+            verbose=VERBOSE,
+            )
 
         # ── Write ──────────────────────────────────────────────────────────
         audio_written, midi_written, healed_audio_items, playlist_track_count = write_rpp(

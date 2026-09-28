@@ -82,12 +82,15 @@ from .audio import (
     assign_regions_to_tracks,
     build_registered_media_map,
     build_wav_index,
+    dedupe_redundant_same_track_audio,
     extract_audio_files,
     extract_audio_tracks,
     extract_regions,
     match_regions_to_wavs,
+    prune_spurious_cross_track_audio,
     read_pt_string,
 )
+
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
 DEFAULT_SAMPLE_RATE = 44100
@@ -279,257 +282,6 @@ def extract_session_timecode_origin_samples(
         f"TC40 correction disabled for safety"
     )
     return None, frame_rate_enum, origin_frames
-
-
-
-def dedupe_redundant_same_track_audio(
-    track_dict: Dict[str, List[ClipPlacement]],
-) -> int:
-    """
-    Collapse redundant same-track audio placements that reproduce the exact
-    same source samples from the exact same timeline start.
-
-    Identity:
-        registered PT source file + timeline start + source offset
-
-    When several Region/edit definitions share that identity, the longest one
-    completely contains the shorter copies and plays the same source samples.
-    Keep the longest placement; first structural occurrence wins equal lengths.
-
-    Different source files, source offsets and timeline positions remain
-    completely independent.
-    """
-    removed = 0
-
-    for track_name, placements in list(track_dict.items()):
-        if len(placements) < 2:
-            continue
-
-        groups = {}
-
-        for order, cp in enumerate(placements):
-            r = cp.region
-
-            if r.file_index is not None and r.file_index >= 0:
-                source_identity = ("file-index", int(r.file_index))
-            elif r.wav_file:
-                source_identity = ("wav", str(r.wav_file).lower())
-            else:
-                # Without source identity, only repeats of the exact Region
-                # definition are safe to collapse.
-                source_identity = ("region-index", int(r.index))
-
-            key = (
-                source_identity,
-                int(cp.timeline_start),
-                int(r.src_offset),
-            )
-            groups.setdefault(key, []).append((order, cp))
-
-        kept = []
-
-        for key, members in groups.items():
-            if len(members) == 1:
-                kept.append(members[0])
-                continue
-
-            winner_order, winner = max(
-                members,
-                key=lambda pair: (int(pair[1].region.length), -pair[0]),
-            )
-            kept.append((winner_order, winner))
-            removed += len(members) - 1
-
-            debug(
-                f"  [audio] same-track duplicate group on {track_name!r}: "
-                f"kept {winner.region.name!r} "
-                f"(len={winner.region.length}), removed {len(members)-1}"
-            )
-
-        kept.sort(key=lambda pair: pair[0])
-        track_dict[track_name] = [cp for _, cp in kept]
-
-    return removed
-
-
-def _audio_name_match_score(track_name: str, region: Region) -> int:
-    """
-    Conservative affinity score used only to arbitrate a region that appears
-    on more than one PT audio track.
-
-    This is not used for normal track assignment.
-    """
-    def norm(x: str) -> str:
-        x = x.lower().strip()
-        x = re.sub(r"\s+\[[lrc]+\]$", "", x)
-        return x
-
-    track = norm(track_name)
-    clip = norm(region.name)
-    wav = norm(Path(region.wav_file).stem if region.wav_file else "")
-
-    score = 0
-    if track and clip.startswith(track):
-        score += 4
-    if track and wav.startswith(track):
-        score += 4
-    if track and track in clip:
-        score += 2
-    if track and track in wav:
-        score += 2
-    return score
-
-
-def _audio_region_alias_key(region: Region):
-    """
-    Return a conservative identity for cross-track alias arbitration.
-
-    Pro Tools can contain duplicate Region definitions with different region
-    indexes even though they have the same clip name and registered source
-    audio file.  Group those definitions together so the alias-pruner can
-    recognise them as siblings.
-
-    The registered PT file_index is deliberately part of the key.  Two clips
-    with the same visible name but different source files are therefore NOT
-    treated as aliases.
-
-    If the source file index is unavailable, fall back to the original
-    region-index identity rather than guessing.
-    """
-    if region.file_index is None or region.file_index < 0:
-        return ("region-index", region.index)
-
-    name = (region.name or "").strip().lower()
-    name = re.sub(r"\s+", " ", name)
-
-    if not name:
-        return ("region-index", region.index)
-
-    return ("pt-source-name", region.file_index, name)
-
-
-def prune_spurious_cross_track_audio(
-    track_dict: Dict[str, List[ClipPlacement]],
-) -> int:
-    """
-    Remove only high-confidence cross-track alias placements.
-
-    PT 0x1054/0x1052 maps can contain references which look active but belong
-    to another source/playlist context. We avoid broad filename filtering.
-
-    A placement is removed only when:
-      1. the same PT source/clip identity appears on multiple REAPER tracks;
-         this includes duplicate PT Region definitions that have different
-         region indexes but the same clip name + registered source file;
-      2. exactly one of those tracks has clearly stronger name/source affinity;
-      3. the weaker placement overlaps another item already on its own track.
-
-    This keeps legitimate copied clips on otherwise empty/non-overlapping
-    tracks while removing high-confidence foreign aliases.
-
-    Important safety rule:
-      - If PT source-file identity is unavailable, grouping falls back to the
-        exact Region index used by earlier PTX2RPP versions.
-    """
-    by_identity: Dict[tuple, List[Tuple[str, ClipPlacement]]] = {}
-
-    for output_track, placements in track_dict.items():
-        for cp in placements:
-            key = _audio_region_alias_key(cp.region)
-            by_identity.setdefault(key, []).append((output_track, cp))
-
-    remove_ids = set()
-
-    for identity, occurrences in by_identity.items():
-        track_names = {track_name for track_name, _ in occurrences}
-        if len(track_names) < 2:
-            continue
-
-        scored = [
-            (
-                _audio_name_match_score(track_name, cp.region),
-                track_name,
-                cp,
-            )
-            for track_name, cp in occurrences
-        ]
-
-        best_score = max(score for score, _, _ in scored)
-        best_tracks = {
-            track_name
-            for score, track_name, _ in scored
-            if score == best_score
-        }
-
-        # Require one unique, clearly matching owner.
-        if best_score < 4 or len(best_tracks) != 1:
-            continue
-
-        owner_track = next(iter(best_tracks))
-
-        for score, track_name, cp in scored:
-            if track_name == owner_track or score >= best_score:
-                continue
-
-            start = cp.timeline_start
-            end = start + max(0, cp.region.length)
-
-            # Preserve legitimate cross-track copies unless this foreign
-            # placement actually collides with material already belonging to
-            # the destination track.
-            overlaps_other = False
-
-            for other in track_dict.get(track_name, []):
-                if other is cp:
-                    continue
-
-                o_start = other.timeline_start
-                o_end = o_start + max(0, other.region.length)
-
-                if start < o_end and o_start < end:
-                    overlaps_other = True
-                    break
-
-            if not overlaps_other:
-                continue
-
-            remove_ids.add(id(cp))
-
-            sibling_indexes = sorted(
-                {
-                    sibling.region.index
-                    for _, sibling in occurrences
-                }
-            )
-
-            debug(
-                f"  [audio] pruned cross-track alias: "
-                f"{cp.region.name!r} region={cp.region.index} "
-                f"from {track_name!r}; strong owner={owner_track!r}; "
-                f"source_file_index={cp.region.file_index}; "
-                f"sibling_regions={sibling_indexes}"
-            )
-
-    if not remove_ids:
-        return 0
-
-    removed = 0
-
-    for track_name in list(track_dict):
-        before = len(track_dict[track_name])
-
-        track_dict[track_name] = [
-            cp
-            for cp in track_dict[track_name]
-            if id(cp) not in remove_ids
-        ]
-
-        removed += before - len(track_dict[track_name])
-
-    return removed
-
-
-
 
 def extract_midi_event_chunks(data: bytes, top: list) -> List[MidiRegionData]:
     """
@@ -1953,9 +1705,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             regions,
             sample_rate,
             session_tc_origin_samples,
+            verbose=VERBOSE,
         )
         duplicate_audio_placements = dedupe_redundant_same_track_audio(
-            audio_track_map
+            audio_track_map,
+            verbose=VERBOSE,
         )
         pruned_audio_aliases = prune_spurious_cross_track_audio(audio_track_map)
 

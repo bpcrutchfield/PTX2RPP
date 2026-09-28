@@ -96,6 +96,7 @@ from .midi import (
     build_midi_chunk_windows,
     extract_midi_event_chunks,
     extract_midi_placements,
+    extract_midi_region_mdnlb_links,
     extract_midi_region_windows,
 )
 
@@ -480,62 +481,6 @@ def _slice_chunk_to_region(chunk_info, region_meta):
             )
         )
     return out
-
-
-def _collect_direct_midi_region_blocks(top):
-    """
-    Return direct PT MIDI region table as:
-      [(region_index, region_0x2633, child_0x2628), ...]
-    """
-    all_blocks = list(_walk_blocks(top))
-    out = []
-    for parent in [b for b in all_blocks if b[1] == 0x2634]:
-        direct = [c for c in parent[4] if c[1] == 0x2633]
-        for rb in direct:
-            child = next((c for c in rb[4] if c[1] == 0x2628), None)
-            out.append((len(out), rb, child))
-    return out
-
-
-def extract_midi_region_mdnlb_links(data: bytes, top: list) -> dict:
-    """
-    Direct PT MIDI region -> MdNLB linkage.
-
-    Proven from Silent Longing training mappings in v34:
-      r19/r20/r21 -> 6
-      r22         -> 13
-      r23         -> 2
-      r24         -> 14
-
-    In every 0x2633 MIDI-region wrapper, the first 4 bytes immediately AFTER
-    the direct 0x2628 child contain the MdNLB list index as little-endian u32.
-
-    Example wrapper-only tails observed in v34:
-      r019 ... 06 00 00 00  -> MdNLB[06]
-      r022 ... 0d 00 00 00  -> MdNLB[13]
-      r023 ... 02 00 00 00  -> MdNLB[02]
-      r024 ... 0e 00 00 00  -> MdNLB[14]
-
-    Returns:
-        region_index -> mdnlb_index
-    """
-    links = {}
-    regions = _collect_direct_midi_region_blocks(top)
-
-    for ri, rb, child in regions:
-        if child is None:
-            continue
-
-        rb_end = min(len(data), rb[3] + rb[2])
-        child_end = child[3] + child[2]
-
-        if child_end + 4 > rb_end or child_end + 4 > len(data):
-            continue
-
-        mdnlb_index = r4(data, child_end)
-        links[ri] = int(mdnlb_index)
-
-    return links
 
 
 def _walk_blocks(blocks):

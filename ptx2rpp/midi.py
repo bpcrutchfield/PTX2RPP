@@ -714,3 +714,109 @@ def build_midi_chunk_windows(
         )
 
     return infos
+
+def _collect_direct_midi_region_blocks(top):
+    """
+    Return direct PT MIDI region table as:
+      [(region_index, region_0x2633, child_0x2628), ...]
+    """
+    all_blocks = list(_walk_blocks(top))
+    output = []
+
+    for parent in [
+        block
+        for block in all_blocks
+        if block[1] == 0x2634
+    ]:
+        direct_regions = [
+            child
+            for child in parent[4]
+            if child[1] == 0x2633
+        ]
+
+        for region_block in direct_regions:
+            child = next(
+                (
+                    item
+                    for item in region_block[4]
+                    if item[1] == 0x2628
+                ),
+                None,
+            )
+
+            output.append(
+                (
+                    len(output),
+                    region_block,
+                    child,
+                )
+            )
+
+    return output
+
+def extract_midi_region_mdnlb_links(
+    data: bytes,
+    top: list,
+) -> dict:
+    """
+    Direct PT MIDI region -> MdNLB linkage.
+
+    Proven from Silent Longing training mappings:
+      r19/r20/r21 -> 6
+      r22         -> 13
+      r23         -> 2
+      r24         -> 14
+
+    In every 0x2633 MIDI-region wrapper, the first 4 bytes immediately AFTER
+    the direct 0x2628 child contain the MdNLB list index as little-endian u32.
+
+    Example wrapper-only tails:
+      r019 ... 06 00 00 00  -> MdNLB[06]
+      r022 ... 0d 00 00 00  -> MdNLB[13]
+      r023 ... 02 00 00 00  -> MdNLB[02]
+      r024 ... 0e 00 00 00  -> MdNLB[14]
+
+    Returns:
+        region_index -> mdnlb_index
+    """
+    links = {}
+
+    regions = _collect_direct_midi_region_blocks(
+        top
+    )
+
+    for (
+        region_index,
+        region_block,
+        child,
+    ) in regions:
+        if child is None:
+            continue
+
+        region_end = min(
+            len(data),
+            region_block[3]
+            + region_block[2],
+        )
+
+        child_end = (
+            child[3]
+            + child[2]
+        )
+
+        if (
+            child_end + 4 > region_end
+            or child_end + 4 > len(data)
+        ):
+            continue
+
+        mdnlb_index = r4(
+            data,
+            child_end,
+        )
+
+        links[region_index] = int(
+            mdnlb_index
+        )
+
+    return links

@@ -398,72 +398,10 @@ def _midi_source_events(
 
     return out
 
-
-
-
-
-def _midi_window_score(region_meta, chunk_info):
-    """
-    Score how well an MdNLB's actual musical extent fits a PT MIDI region's
-    source window.  1.0 is approximately an exact source-window match.
-    """
-    rs = region_meta["source_start"]
-    re_ = rs + region_meta["length"]
-    cs = chunk_info["abs_start"]
-    ce = chunk_info["abs_end"]
-
-    rlen = max(1, re_ - rs)
-    clen = max(1, ce - cs)
-
-    overlap = max(0, min(re_, ce) - max(rs, cs))
-    if overlap <= 0:
-        return 0.0, {
-            "overlap": 0,
-            "region_cov": 0.0,
-            "chunk_cov": 0.0,
-            "length_sim": 0.0,
-            "start_delta": abs(cs-rs),
-            "end_delta": abs(ce-re_),
-        }
-
-    region_cov = overlap / rlen
-    chunk_cov = overlap / clen
-    length_sim = min(rlen, clen) / max(rlen, clen)
-    start_delta = abs(cs - rs)
-    end_delta = abs(ce - re_)
-    scale = max(rlen, clen, PT_MIDI_TICKS_PER_QN)
-    start_close = max(0.0, 1.0 - (start_delta / scale))
-
-    score = (
-        0.35 * region_cov +
-        0.35 * chunk_cov +
-        0.20 * length_sim +
-        0.10 * start_close
-    )
-
-    return score, {
-        "overlap": overlap,
-        "region_cov": region_cov,
-        "chunk_cov": chunk_cov,
-        "length_sim": length_sim,
-        "start_delta": start_delta,
-        "end_delta": end_delta,
-    }
-
-
 def _walk_blocks(blocks):
     for b in blocks:
         yield b
         yield from _walk_blocks(b[4])
-
-
-def _safe_pt_string(data: bytes, pos: int):
-    try:
-        s, end = read_pt_string(data, pos)
-        return s, end
-    except Exception:
-        return "", pos
-
 
 
 def _quote_rpp_string(value: str) -> str:

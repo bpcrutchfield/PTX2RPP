@@ -98,6 +98,7 @@ from .midi import (
     extract_midi_placements,
     extract_midi_region_mdnlb_links,
     extract_midi_region_windows,
+    resolve_midi_placements_direct,
 )
 
 APP_NAME = "PTX2RPP"
@@ -450,39 +451,6 @@ def _midi_window_score(region_meta, chunk_info):
     }
 
 
-def _slice_chunk_to_region(chunk_info, region_meta):
-    """
-    Crop the underlying MdNLB events to the PT region's source window and
-    shift them so the REAPER MIDI item begins at tick zero.
-    """
-    rs = region_meta["source_start"]
-    re_ = rs + region_meta["length"]
-    zero = chunk_info["zero_rel"]
-
-    out = []
-    for n in chunk_info["chunk"].notes:
-        ns = zero + n.pos
-        ne = ns + n.length
-
-        if ne <= rs or ns >= re_:
-            continue
-
-        clipped_start = max(ns, rs)
-        clipped_end = min(ne, re_)
-        if clipped_end <= clipped_start:
-            continue
-
-        out.append(
-            MidiNote(
-                clipped_start - rs,
-                n.note,
-                clipped_end - clipped_start,
-                n.velocity,
-            )
-        )
-    return out
-
-
 def _walk_blocks(blocks):
     for b in blocks:
         yield b
@@ -496,84 +464,6 @@ def _safe_pt_string(data: bytes, pos: int):
     except Exception:
         return "", pos
 
-
-def resolve_midi_placements_direct(data: bytes, top: list):
-    """
-    Resolve active PT MIDI placements through the proven structural linkage:
-
-        0x2633 MIDI region
-          ├─ 0x2628 : region name + source/edit window
-          └─ trailing little-endian u32 : exact MdNLB index
-
-    The linked MdNLB list is then cropped to the region source window.
-    """
-    placements, duplicate_refs_skipped = extract_midi_placements(data, top)
-    region_meta = extract_midi_region_windows(data, top)
-    chunk_infos = build_midi_chunk_windows(data, top)
-    direct_links = extract_midi_region_mdnlb_links(data, top)
-
-    chunks_by_index = {ci["index"]: ci for ci in chunk_infos}
-    resolved = {}
-    unresolved = []
-
-    for track_name, track_placements in placements.items():
-        rows = []
-
-        for placement in track_placements:
-            region_index = placement.region_index
-            meta = region_meta.get(region_index)
-            mdnlb_index = direct_links.get(region_index)
-            chunk_info = (
-                chunks_by_index.get(mdnlb_index)
-                if mdnlb_index is not None
-                else None
-            )
-
-            if meta is None:
-                unresolved.append(
-                    (track_name, region_index, placement.timeline_ticks,
-                     "no decoded PT MIDI region window")
-                )
-                continue
-
-            if mdnlb_index is None:
-                unresolved.append(
-                    (track_name, region_index, placement.timeline_ticks,
-                     "no trailing MdNLB index in 0x2633")
-                )
-                continue
-
-            if chunk_info is None:
-                unresolved.append(
-                    (track_name, region_index, placement.timeline_ticks,
-                     f"MdNLB index {mdnlb_index} out of range")
-                )
-                continue
-
-            notes = _slice_chunk_to_region(chunk_info, meta)
-            if not notes:
-                unresolved.append(
-                    (
-                        track_name,
-                        region_index,
-                        placement.timeline_ticks,
-                        f"MdNLB[{mdnlb_index}] has no notes in region source window",
-                    )
-                )
-                continue
-
-            rows.append(
-                (
-                    placement,
-                    chunk_info["chunk"],
-                    meta,
-                    notes,
-                )
-            )
-
-        resolved[track_name] = rows
-
-    return placements, resolved, unresolved, duplicate_refs_skipped
 
 
 def _quote_rpp_string(value: str) -> str:

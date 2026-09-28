@@ -820,3 +820,215 @@ def extract_midi_region_mdnlb_links(
         )
 
     return links
+
+def _slice_chunk_to_region(
+    chunk_info,
+    region_meta,
+):
+    """
+    Crop the underlying MdNLB events to the PT region's source window and
+    shift them so the REAPER MIDI item begins at tick zero.
+    """
+    region_start = region_meta[
+        "source_start"
+    ]
+
+    region_end = (
+        region_start
+        + region_meta["length"]
+    )
+
+    zero = chunk_info[
+        "zero_rel"
+    ]
+
+    output = []
+
+    for note in chunk_info["chunk"].notes:
+        note_start = (
+            zero
+            + note.pos
+        )
+
+        note_end = (
+            note_start
+            + note.length
+        )
+
+        if (
+            note_end <= region_start
+            or note_start >= region_end
+        ):
+            continue
+
+        clipped_start = max(
+            note_start,
+            region_start,
+        )
+
+        clipped_end = min(
+            note_end,
+            region_end,
+        )
+
+        if clipped_end <= clipped_start:
+            continue
+
+        output.append(
+            MidiNote(
+                clipped_start
+                - region_start,
+                note.note,
+                clipped_end
+                - clipped_start,
+                note.velocity,
+            )
+        )
+
+    return output
+
+def resolve_midi_placements_direct(
+    data: bytes,
+    top: list,
+):
+    """
+    Resolve active PT MIDI placements through the proven structural linkage:
+
+        0x2633 MIDI region
+          ├─ 0x2628 : region name + source/edit window
+          └─ trailing little-endian u32 : exact MdNLB index
+
+    The linked MdNLB list is then cropped to the region source window.
+    """
+    (
+        placements,
+        duplicate_refs_skipped,
+    ) = extract_midi_placements(
+        data,
+        top,
+    )
+
+    region_meta = extract_midi_region_windows(
+        data,
+        top,
+    )
+
+    chunk_infos = build_midi_chunk_windows(
+        data,
+        top,
+    )
+
+    direct_links = extract_midi_region_mdnlb_links(
+        data,
+        top,
+    )
+
+    chunks_by_index = {
+        chunk_info["index"]: chunk_info
+        for chunk_info in chunk_infos
+    }
+
+    resolved = {}
+    unresolved = []
+
+    for (
+        track_name,
+        track_placements,
+    ) in placements.items():
+
+        rows = []
+
+        for placement in track_placements:
+            region_index = (
+                placement.region_index
+            )
+
+            meta = region_meta.get(
+                region_index
+            )
+
+            mdnlb_index = direct_links.get(
+                region_index
+            )
+
+            chunk_info = (
+                chunks_by_index.get(
+                    mdnlb_index
+                )
+                if mdnlb_index is not None
+                else None
+            )
+
+            if meta is None:
+                unresolved.append(
+                    (
+                        track_name,
+                        region_index,
+                        placement.timeline_ticks,
+                        "no decoded PT MIDI region window",
+                    )
+                )
+                continue
+
+            if mdnlb_index is None:
+                unresolved.append(
+                    (
+                        track_name,
+                        region_index,
+                        placement.timeline_ticks,
+                        "no trailing MdNLB index in 0x2633",
+                    )
+                )
+                continue
+
+            if chunk_info is None:
+                unresolved.append(
+                    (
+                        track_name,
+                        region_index,
+                        placement.timeline_ticks,
+                        (
+                            f"MdNLB index "
+                            f"{mdnlb_index} out of range"
+                        ),
+                    )
+                )
+                continue
+
+            notes = _slice_chunk_to_region(
+                chunk_info,
+                meta,
+            )
+
+            if not notes:
+                unresolved.append(
+                    (
+                        track_name,
+                        region_index,
+                        placement.timeline_ticks,
+                        (
+                            f"MdNLB[{mdnlb_index}] "
+                            f"has no notes in region "
+                            f"source window"
+                        ),
+                    )
+                )
+                continue
+
+            rows.append(
+                (
+                    placement,
+                    chunk_info["chunk"],
+                    meta,
+                    notes,
+                )
+            )
+
+        resolved[track_name] = rows
+
+    return (
+        placements,
+        resolved,
+        unresolved,
+        duplicate_refs_skipped,
+    )

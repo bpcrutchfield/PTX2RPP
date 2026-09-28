@@ -47,7 +47,6 @@ import re
 import struct
 import sys
 import time
-import wave
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .models import (
@@ -89,6 +88,7 @@ from .audio import (
     match_regions_to_wavs,
     prune_spurious_cross_track_audio,
     read_pt_string,
+    heal_short_audio_item_lengths,
 )
 
 APP_NAME = "PTX2RPP"
@@ -939,91 +939,6 @@ def resolve_midi_placements_direct(data: bytes, top: list):
     return placements, resolved, unresolved, duplicate_refs_skipped
 
 
-
-
-def _media_frame_count(path: str) -> Optional[int]:
-    """Return PCM frame count for WAV media when available."""
-    try:
-        with wave.open(path, "rb") as wf:
-            return wf.getnframes()
-    except Exception:
-        return None
-
-
-def heal_short_audio_item_lengths(
-    audio_tracks: Dict[str, List[ClipPlacement]],
-    sample_rate: int,
-    max_gap_ms: float = 250.0,
-) -> Tuple[Dict[int, int], int]:
-    """
-    Compute conservative timeline lengths for audio placements.
-
-    Some PTX sessions contain region definitions whose stored source length
-    ends slightly before the following playlist edit. REAPER then shows a gap.
-
-    Extend only when:
-      - a following item exists on the same output track;
-      - the current item ends before that following item;
-      - the gap is <= max_gap_ms;
-      - the underlying WAV has enough source media to cover the extension.
-    """
-    max_gap_samples = max(0, int(round(max_gap_ms * sample_rate / 1000.0)))
-    effective: Dict[int, int] = {}
-    media_frames: Dict[str, Optional[int]] = {}
-    healed = 0
-
-    for track_name, placements in audio_tracks.items():
-        ordered = sorted(placements, key=lambda p: p.timeline_start)
-
-        for i, placement in enumerate(ordered):
-            region = placement.region
-            base_len = max(0, int(region.length))
-            effective[id(placement)] = base_len
-
-            if i + 1 >= len(ordered) or max_gap_samples <= 0:
-                continue
-
-            next_placement = ordered[i + 1]
-            next_start = int(next_placement.timeline_start)
-            current_end = int(placement.timeline_start) + base_len
-
-            if next_start <= current_end:
-                continue
-
-            gap = next_start - current_end
-            if gap > max_gap_samples:
-                continue
-
-            wav_path = region.wav_file
-            if not wav_path:
-                continue
-
-            if wav_path not in media_frames:
-                media_frames[wav_path] = _media_frame_count(wav_path)
-
-            total_frames = media_frames[wav_path]
-            if total_frames is None:
-                continue
-
-            target_len = next_start - int(placement.timeline_start)
-            source_end = int(region.src_offset) + target_len
-
-            if source_end > total_frames:
-                continue
-
-            effective[id(placement)] = target_len
-            healed += 1
-
-            debug(
-                f"  [audio] healed short item on {track_name!r}: "
-                f"{region.name!r} +{gap} samples "
-                f"({gap / sample_rate * 1000.0:.2f} ms)"
-            )
-
-    return effective, healed
-
-
-
 def _split_output_track_name(name: str) -> Tuple[str, str]:
     """
     'Vocals Chorus.03 [L]' -> ('Vocals Chorus.03', ' [L]')
@@ -1711,7 +1626,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             audio_track_map,
             verbose=VERBOSE,
         )
-        pruned_audio_aliases = prune_spurious_cross_track_audio(audio_track_map)
+        pruned_audio_aliases = prune_spurious_cross_track_audio(
+            audio_track_map,
+            verbose=VERBOSE,
+        )
 
         audio_placement_count = sum(
             len(items) for items in audio_track_map.values()

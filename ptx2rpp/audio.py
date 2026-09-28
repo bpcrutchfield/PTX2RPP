@@ -1,6 +1,7 @@
 """Pro Tools audio parsing and media handling."""
 
 import re
+import wave
 
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -1029,3 +1030,122 @@ def prune_spurious_cross_track_audio(
         )
 
     return removed
+
+def _media_frame_count(path: str) -> Optional[int]:
+    """Return PCM frame count for WAV media when available."""
+    try:
+        with wave.open(path, "rb") as wf:
+            return wf.getnframes()
+    except Exception:
+        return None
+
+
+def heal_short_audio_item_lengths(
+    audio_tracks: Dict[str, List[ClipPlacement]],
+    sample_rate: int,
+    max_gap_ms: float = 250.0,
+    verbose: bool = False,
+) -> Tuple[Dict[int, int], int]:
+    """
+    Compute conservative timeline lengths for audio placements.
+
+    Some PTX sessions contain region definitions whose stored source length
+    ends slightly before the following playlist edit. REAPER then shows a gap.
+
+    Extend only when:
+      - a following item exists on the same output track;
+      - the current item ends before that following item;
+      - the gap is <= max_gap_ms;
+      - the underlying WAV has enough source media to cover the extension.
+    """
+
+    def debug(*args, **kwargs) -> None:
+        if verbose:
+            print(*args, **kwargs)
+
+    max_gap_samples = max(
+        0,
+        int(round(max_gap_ms * sample_rate / 1000.0)),
+    )
+
+    effective: Dict[int, int] = {}
+    media_frames: Dict[str, Optional[int]] = {}
+    healed = 0
+
+    for track_name, placements in audio_tracks.items():
+        ordered = sorted(
+            placements,
+            key=lambda p: p.timeline_start,
+        )
+
+        for i, placement in enumerate(ordered):
+            region = placement.region
+            base_len = max(0, int(region.length))
+
+            effective[id(placement)] = base_len
+
+            if (
+                i + 1 >= len(ordered)
+                or max_gap_samples <= 0
+            ):
+                continue
+
+            next_placement = ordered[i + 1]
+
+            next_start = int(
+                next_placement.timeline_start
+            )
+
+            current_end = (
+                int(placement.timeline_start)
+                + base_len
+            )
+
+            if next_start <= current_end:
+                continue
+
+            gap = next_start - current_end
+
+            if gap > max_gap_samples:
+                continue
+
+            wav_path = region.wav_file
+
+            if not wav_path:
+                continue
+
+            if wav_path not in media_frames:
+                media_frames[wav_path] = (
+                    _media_frame_count(wav_path)
+                )
+
+            total_frames = media_frames[wav_path]
+
+            if total_frames is None:
+                continue
+
+            target_len = (
+                next_start
+                - int(placement.timeline_start)
+            )
+
+            source_end = (
+                int(region.src_offset)
+                + target_len
+            )
+
+            if source_end > total_frames:
+                continue
+
+            effective[id(placement)] = target_len
+            healed += 1
+
+            debug(
+                f"  [audio] healed short item on "
+                f"{track_name!r}: "
+                f"{region.name!r} "
+                f"+{gap} samples "
+                f"({gap / sample_rate * 1000.0:.2f} ms)"
+            )
+
+    return effective, healed

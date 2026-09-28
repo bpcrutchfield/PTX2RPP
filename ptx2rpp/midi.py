@@ -1,11 +1,13 @@
 """Pro Tools MIDI parsing and placement resolution."""
+import re
 
 from typing import Dict, List, Tuple
 
 from .models import MidiNote, MidiPlacement, MidiRegionData
-from .ptx import r4, r5
 from .audio import read_pt_string
-from .timing import ZERO_TICKS
+
+from .ptx import parse_three_point, r4, r5
+from .timing import PT_MIDI_TICKS_PER_QN, ZERO_TICKS
 
 def _walk_blocks(blocks):
     """Yield every parsed PTX block recursively."""
@@ -250,3 +252,257 @@ def extract_midi_placements(
         )
 
     return result, duplicate_refs_skipped
+
+def extract_midi_region_windows(
+    data: bytes,
+    top: list,
+) -> dict:
+    """
+    Decode PT10+ MIDI region source windows from 0x2634 -> 0x2633 -> 0x2628.
+
+    The region payload contains the same PT 'three point' structure used by
+    libptformat: source offset, region length, and original start. MIDI source
+    offsets are commonly stored in the absolute ZERO_TICKS domain while the
+    original start is already relative musical ticks.
+
+    Returns:
+        region_index -> {
+            name, source_start, length, original_start, header_offset, block
+        }
+    """
+    all_blocks = list(_walk_blocks(top))
+    regions = []
+
+    for parent in [
+        block
+        for block in all_blocks
+        if block[1] == 0x2634
+    ]:
+        regions.extend(
+            [
+                child
+                for child in parent[4]
+                if child[1] == 0x2633
+            ]
+        )
+
+    result = {}
+
+    for region_index, region in enumerate(regions):
+        children = [
+            child
+            for child in region[4]
+            if child[1] == 0x2628
+        ]
+
+        if not children:
+            continue
+
+        child = children[0]
+
+        lo = child[3]
+        hi = min(
+            len(data),
+            child[3] + child[2],
+        )
+
+        candidates = []
+
+        scan_hi = min(
+            hi - 10,
+            lo + 96,
+        )
+
+        for j in range(
+            lo,
+            max(lo, scan_hi),
+        ):
+            if j + 10 >= len(data):
+                break
+
+            offset_bytes = (
+                data[j + 1] & 0xF0
+            ) >> 4
+
+            length_bytes = (
+                data[j + 2] & 0xF0
+            ) >> 4
+
+            start_bytes = (
+                data[j + 3] & 0xF0
+            ) >> 4
+
+            if not (
+                1 <= offset_bytes <= 5
+                and 1 <= length_bytes <= 5
+                and 1 <= start_bytes <= 5
+            ):
+                continue
+
+            (
+                source_raw,
+                length,
+                start_raw,
+            ) = parse_three_point(
+                data,
+                j,
+            )
+
+            if (
+                length <= 0
+                or length > 1_000_000_000
+            ):
+                continue
+
+            source_relative = (
+                source_raw - ZERO_TICKS
+                if source_raw >= ZERO_TICKS
+                else source_raw
+            )
+
+            start_relative = (
+                start_raw - ZERO_TICKS
+                if start_raw >= ZERO_TICKS
+                else start_raw
+            )
+
+            if not (
+                0
+                <= source_relative
+                <= 2_000_000_000
+            ):
+                continue
+
+            if not (
+                0
+                <= start_relative
+                <= 2_000_000_000
+            ):
+                continue
+
+            score = 0
+
+            # PT MIDI source offsets in these sessions are five-byte values.
+            if offset_bytes == 5:
+                score += 5
+
+            if source_raw >= ZERO_TICKS:
+                score += 5
+
+            # Region definitions commonly keep source and original starts close.
+            delta = abs(
+                source_relative
+                - start_relative
+            )
+
+            if delta <= 32:
+                score += 5
+
+            elif delta <= max(
+                length,
+                PT_MIDI_TICKS_PER_QN,
+            ):
+                score += 3
+
+            elif delta <= length * 4:
+                score += 1
+
+            # Header byte-count patterns around 5/3-4/4 are common in PT10+.
+            if start_bytes == 4:
+                score += 2
+
+            if 2 <= length_bytes <= 5:
+                score += 1
+
+            candidates.append(
+                (
+                    score,
+                    j,
+                    source_relative,
+                    int(length),
+                    start_relative,
+                    source_raw,
+                    offset_bytes,
+                    length_bytes,
+                    start_bytes,
+                )
+            )
+
+        if not candidates:
+            continue
+
+        candidates.sort(
+            key=lambda item: (
+                -item[0],
+                item[1],
+            )
+        )
+
+        (
+            score,
+            j,
+            source_relative,
+            length,
+            start_relative,
+            source_raw,
+            offset_bytes,
+            length_bytes,
+            start_bytes,
+        ) = candidates[0]
+
+        # Pull a readable region name from bytes preceding the three-point
+        # header.
+        prefix = data[lo:j]
+
+        printable = re.findall(
+            rb"[\x20-\x7e]{2,}",
+            prefix,
+        )
+
+        name = ""
+
+        for piece in printable:
+            try:
+                text = piece.decode(
+                    "utf-8",
+                    "replace",
+                ).strip("\x00 ").strip()
+
+            except Exception:
+                continue
+
+            if (
+                text
+                and any(
+                    character.isalpha()
+                    for character in text
+                )
+            ):
+                name = text
+
+        if not name:
+            name = (
+                f"PT MIDI region "
+                f"{region_index}"
+            )
+
+        result[region_index] = {
+            "name": name,
+            "source_start": int(
+                source_relative
+            ),
+            "length": int(length),
+            "original_start": int(
+                start_relative
+            ),
+            "header_offset": int(j),
+            "header_score": int(score),
+            "byte_counts": (
+                offset_bytes,
+                length_bytes,
+                start_bytes,
+            ),
+            "block": child,
+        }
+
+    return result

@@ -95,6 +95,7 @@ from .audio import (
 from .midi import (
     extract_midi_event_chunks,
     extract_midi_placements,
+    extract_midi_region_windows,
 )
 
 APP_NAME = "PTX2RPP"
@@ -394,120 +395,6 @@ def _midi_source_events(
 
     return out
 
-
-def extract_midi_region_windows(data: bytes, top: list) -> dict:
-    """
-    Decode PT10+ MIDI region source windows from 0x2634 -> 0x2633 -> 0x2628.
-
-    The region payload contains the same PT 'three point' structure used by
-    libptformat: source offset, region length, and original start.  MIDI source
-    offsets are commonly stored in the absolute ZERO_TICKS domain while the
-    original start is already relative musical ticks.
-
-    Returns:
-        region_index -> {
-            name, source_start, length, original_start, header_offset, block
-        }
-    """
-    all_blocks = list(_walk_blocks(top))
-    regions = []
-    for parent in [b for b in all_blocks if b[1] == 0x2634]:
-        regions.extend([c for c in parent[4] if c[1] == 0x2633])
-
-    result = {}
-
-    for ri, region in enumerate(regions):
-        kids = [c for c in region[4] if c[1] == 0x2628]
-        if not kids:
-            continue
-
-        c = kids[0]
-        lo = c[3]
-        hi = min(len(data), c[3] + c[2])
-
-        candidates = []
-        scan_hi = min(hi - 10, lo + 96)
-
-        for j in range(lo, max(lo, scan_hi)):
-            if j + 10 >= len(data):
-                break
-
-            ob = (data[j + 1] & 0xF0) >> 4
-            lb = (data[j + 2] & 0xF0) >> 4
-            sb = (data[j + 3] & 0xF0) >> 4
-
-            if not (1 <= ob <= 5 and 1 <= lb <= 5 and 1 <= sb <= 5):
-                continue
-
-            src_raw, length, start_raw = parse_three_point(data, j)
-            if length <= 0 or length > 1_000_000_000:
-                continue
-
-            src_rel = src_raw - ZERO_TICKS if src_raw >= ZERO_TICKS else src_raw
-            start_rel = start_raw - ZERO_TICKS if start_raw >= ZERO_TICKS else start_raw
-
-            if not (0 <= src_rel <= 2_000_000_000):
-                continue
-            if not (0 <= start_rel <= 2_000_000_000):
-                continue
-
-            score = 0
-            # PT MIDI source offsets in these sessions are five-byte values.
-            if ob == 5:
-                score += 5
-            if src_raw >= ZERO_TICKS:
-                score += 5
-            # Region definitions commonly keep source and original starts close.
-            delta = abs(src_rel - start_rel)
-            if delta <= 32:
-                score += 5
-            elif delta <= max(length, PT_MIDI_TICKS_PER_QN):
-                score += 3
-            elif delta <= length * 4:
-                score += 1
-
-            # Header byte-count patterns around 5/3-4/4 are common in PT10+.
-            if sb == 4:
-                score += 2
-            if 2 <= lb <= 5:
-                score += 1
-
-            candidates.append(
-                (score, j, src_rel, int(length), start_rel, src_raw, ob, lb, sb)
-            )
-
-        if not candidates:
-            continue
-
-        candidates.sort(key=lambda x: (-x[0], x[1]))
-        score, j, src_rel, length, start_rel, src_raw, ob, lb, sb = candidates[0]
-
-        # Pull a readable region name from bytes preceding the three-point header.
-        prefix = data[lo:j]
-        printable = re.findall(rb"[\x20-\x7e]{2,}", prefix)
-        name = ""
-        for piece in printable:
-            try:
-                t = piece.decode("utf-8", "replace").strip("\x00 ").strip()
-            except Exception:
-                continue
-            if t and any(ch.isalpha() for ch in t):
-                name = t
-        if not name:
-            name = f"PT MIDI region {ri}"
-
-        result[ri] = {
-            "name": name,
-            "source_start": int(src_rel),
-            "length": int(length),
-            "original_start": int(start_rel),
-            "header_offset": int(j),
-            "header_score": int(score),
-            "byte_counts": (ob, lb, sb),
-            "block": c,
-        }
-
-    return result
 
 
 def build_midi_chunk_windows(data: bytes, top: list):

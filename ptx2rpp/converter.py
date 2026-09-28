@@ -92,6 +92,8 @@ from .audio import (
     build_playlist_lane_groups,
 )
 
+from .midi import extract_midi_event_chunks
+
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
 DEFAULT_SAMPLE_RATE = 44100
@@ -283,47 +285,6 @@ def extract_session_timecode_origin_samples(
         f"TC40 correction disabled for safety"
     )
     return None, frame_rate_enum, origin_frames
-
-def extract_midi_event_chunks(data: bytes, top: list) -> List[MidiRegionData]:
-    """
-    Decode MdNLB event chunks using the same 5-byte event representation used
-    by libptformat. In this PTX the event data uses 960,000 PT ticks per QN.
-    The decoded lists are later linked to PT MIDI regions through the trailing u32 in each 0x2633 wrapper.
-    """
-    chunks = []
-    all_blocks = list(_walk_blocks(top))
-    for b in [x for x in all_blocks if x[1] == 0x2000]:
-        start = b[3]
-        end = min(len(data), b[3] + b[2])
-        k = start
-        while k + 35 < end:
-            p = data.find(b"MdNLB", k, end)
-            if p < 0:
-                break
-            q = p + 11
-            if q + 9 > end:
-                break
-            n_events = r4(data, q)
-            q += 4
-            zero_ticks = r5(data, q)
-            ep = q
-            notes = []
-            for _ in range(n_events):
-                if ep + 18 > end:
-                    break
-                raw_pos = r5(data, ep)
-                pos = raw_pos - zero_ticks
-                if pos < 0:
-                    pos = 0
-                note = data[ep + 8]
-                length = r5(data, ep + 9)
-                velocity = data[ep + 17]
-                if 0 <= note <= 127 and 0 <= velocity <= 127 and length >= 0:
-                    notes.append(MidiNote(pos, note, length, velocity))
-                ep += 35
-            chunks.append(MidiRegionData(len(chunks), f"MIDI Region {len(chunks)}", notes))
-            k = max(ep, p + 5)
-    return chunks
 
 
 def extract_midi_placements(

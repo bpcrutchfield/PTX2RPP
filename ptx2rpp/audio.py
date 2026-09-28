@@ -5,7 +5,12 @@ import wave
 
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from .models import AudioTrack, ClipPlacement, Region
+from .models import (
+    AudioTrack,
+    ClipPlacement,
+    PlaylistLaneGroup,
+    Region,
+)
 from .ptx import find_by_ct, parse_three_point, r2, r4, r5
 from .timing import ZERO_TICKS
 
@@ -1149,3 +1154,172 @@ def heal_short_audio_item_lengths(
             )
 
     return effective, healed
+
+def _split_output_track_name(name: str) -> Tuple[str, str]:
+    """
+    'Vocals Chorus.03 [L]' -> ('Vocals Chorus.03', ' [L]')
+    """
+    match = re.match(
+        r"^(.*?)(\s+\[(?:L|R|ch\d+)\])$",
+        name,
+    )
+
+    if match:
+        return match.group(1), match.group(2)
+
+    return name, ""
+
+
+def _playlist_candidate_roots(stem: str) -> List[str]:
+    """
+    Return likely parent track names for playlist-looking names.
+
+    Examples:
+      Vocals Chorus.03       -> ['Vocals Chorus']
+      Vocals Chorus.dup1.03  -> ['Vocals Chorus.dup1', 'Vocals Chorus']
+
+    We only use these as candidates; grouping additionally requires the parent
+    track to exist and a family to contain multiple alternate playlists.
+    """
+    roots = []
+
+    match = re.match(
+        r"^(.*)\.(\d{2,3})$",
+        stem,
+    )
+
+    if not match:
+        return roots
+
+    pre = match.group(1)
+    roots.append(pre)
+
+    duplicate_match = re.match(
+        r"^(.*)\.dup\d+$",
+        pre,
+        re.IGNORECASE,
+    )
+
+    if duplicate_match:
+        roots.append(
+            duplicate_match.group(1)
+        )
+
+    # Prefer the immediate parent first (e.g. Track.dup1), then the
+    # root track (Track) only when that immediate parent is absent.
+    output = []
+
+    for root in roots:
+        if root not in output:
+            output.append(root)
+
+    return output
+
+
+def build_playlist_lane_groups(
+    audio_tracks: Dict[str, List[ClipPlacement]],
+) -> Tuple[List[PlaylistLaneGroup], set]:
+    """
+    Conservatively identify Pro Tools playlist families from mapped audio tracks.
+
+    A family is created only when:
+      - an unsuffixed parent output track exists; and
+      - at least TWO numbered sibling playlists point back to that parent.
+
+    This avoids turning every '.01' style track name into a lane accidentally.
+
+    The active/unsuffixed playlist is lane 0.
+    """
+    keys = list(audio_tracks.keys())
+    keyset = set(keys)
+
+    # Gather candidate alternates by actual existing parent output track.
+    by_parent: Dict[str, List[str]] = {}
+
+    for key in keys:
+        stem, channel_suffix = _split_output_track_name(
+            key
+        )
+
+        for root in _playlist_candidate_roots(stem):
+            parent = root + channel_suffix
+
+            if parent in keyset and parent != key:
+                by_parent.setdefault(
+                    parent,
+                    [],
+                ).append(key)
+
+                break
+
+    groups = []
+    consumed = set()
+
+    for parent, alternates in by_parent.items():
+
+        # Require at least 2 alternate playlists for safety.
+        alternates = sorted(
+            set(alternates),
+            key=lambda name: (
+                _playlist_sort_key(
+                    _split_output_track_name(name)[0]
+                ),
+                name.lower(),
+            ),
+        )
+
+        if len(alternates) < 2:
+            continue
+
+        group = PlaylistLaneGroup(parent)
+
+        parent_stem, _ = _split_output_track_name(
+            parent
+        )
+
+        # Lane 0 = active PT playlist.
+        group.lanes.append(
+            (
+                parent_stem,
+                audio_tracks.get(parent, []),
+                True,
+            )
+        )
+
+        for alternate in alternates:
+            alternate_stem, _ = (
+                _split_output_track_name(alternate)
+            )
+
+            group.lanes.append(
+                (
+                    alternate_stem,
+                    audio_tracks.get(alternate, []),
+                    False,
+                )
+            )
+
+        groups.append(group)
+
+        consumed.add(parent)
+        consumed.update(alternates)
+
+    return groups, consumed
+
+
+def _playlist_sort_key(name: str):
+    """
+    Natural-ish playlist sorting:
+      Track.01 ... Track.10, Track.dup1.01 ... etc.
+    """
+    parts = re.split(
+        r"(\d+)",
+        name.lower(),
+    )
+
+    return tuple(
+        int(part)
+        if part.isdigit()
+        else part
+        for part in parts
+    )

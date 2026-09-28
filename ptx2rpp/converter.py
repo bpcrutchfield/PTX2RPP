@@ -89,6 +89,7 @@ from .audio import (
     prune_spurious_cross_track_audio,
     read_pt_string,
     heal_short_audio_item_lengths,
+    build_playlist_lane_groups,
 )
 
 APP_NAME = "PTX2RPP"
@@ -937,123 +938,6 @@ def resolve_midi_placements_direct(data: bytes, top: list):
         resolved[track_name] = rows
 
     return placements, resolved, unresolved, duplicate_refs_skipped
-
-
-def _split_output_track_name(name: str) -> Tuple[str, str]:
-    """
-    'Vocals Chorus.03 [L]' -> ('Vocals Chorus.03', ' [L]')
-    """
-    m = re.match(r"^(.*?)(\s+\[(?:L|R|ch\d+)\])$", name)
-    if m:
-        return m.group(1), m.group(2)
-    return name, ""
-
-
-def _playlist_candidate_roots(stem: str) -> List[str]:
-    """
-    Return likely parent track names for playlist-looking names.
-
-    Examples:
-      Vocals Chorus.03       -> ['Vocals Chorus']
-      Vocals Chorus.dup1.03  -> ['Vocals Chorus.dup1', 'Vocals Chorus']
-
-    We only use these as candidates; grouping additionally requires the parent
-    track to exist and a family to contain multiple alternate playlists.
-    """
-    roots = []
-
-    m = re.match(r"^(.*)\.(\d{2,3})$", stem)
-    if not m:
-        return roots
-
-    pre = m.group(1)
-    roots.append(pre)
-
-    mdup = re.match(r"^(.*)\.dup\d+$", pre, re.IGNORECASE)
-    if mdup:
-        roots.append(mdup.group(1))
-
-    # Prefer the immediate parent first (e.g. Track.dup1), then the
-    # root track (Track) only when that immediate parent is absent.
-    out = []
-    for x in roots:
-        if x not in out:
-            out.append(x)
-    return out
-
-
-def build_playlist_lane_groups(
-    audio_tracks: Dict[str, List[ClipPlacement]],
-) -> Tuple[List[PlaylistLaneGroup], set]:
-    """
-    Conservatively identify Pro Tools playlist families from mapped audio tracks.
-
-    A family is created only when:
-      - an unsuffixed parent output track exists; and
-      - at least TWO numbered sibling playlists point back to that parent.
-
-    This avoids turning every '.01' style track name into a lane accidentally.
-
-    The active/unsuffixed playlist is lane 0.
-    """
-    keys = list(audio_tracks.keys())
-    keyset = set(keys)
-
-    # Gather candidate alternates by actual existing parent output track.
-    by_parent: Dict[str, List[str]] = {}
-
-    for key in keys:
-        stem, channel_suffix = _split_output_track_name(key)
-
-        for root in _playlist_candidate_roots(stem):
-            parent = root + channel_suffix
-            if parent in keyset and parent != key:
-                by_parent.setdefault(parent, []).append(key)
-                break
-
-    groups = []
-    consumed = set()
-
-    for parent, alternates in by_parent.items():
-        # Require at least 2 alternate playlists for safety.
-        alternates = sorted(
-            set(alternates),
-            key=lambda n: (
-                _playlist_sort_key(_split_output_track_name(n)[0]),
-                n.lower(),
-            ),
-        )
-        if len(alternates) < 2:
-            continue
-
-        group = PlaylistLaneGroup(parent)
-        parent_stem, _ = _split_output_track_name(parent)
-
-        # lane 0 = active PT playlist
-        group.lanes.append(
-            (parent_stem, audio_tracks.get(parent, []), True)
-        )
-
-        for alt in alternates:
-            alt_stem, _ = _split_output_track_name(alt)
-            group.lanes.append(
-                (alt_stem, audio_tracks.get(alt, []), False)
-            )
-
-        groups.append(group)
-        consumed.add(parent)
-        consumed.update(alternates)
-
-    return groups, consumed
-
-
-def _playlist_sort_key(name: str):
-    """
-    Natural-ish playlist sorting:
-      Track.01 ... Track.10, Track.dup1.01 ... etc.
-    """
-    parts = re.split(r"(\d+)", name.lower())
-    return tuple(int(p) if p.isdigit() else p for p in parts)
 
 
 def _quote_rpp_string(value: str) -> str:

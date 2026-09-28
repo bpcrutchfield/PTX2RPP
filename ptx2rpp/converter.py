@@ -93,6 +93,7 @@ from .audio import (
 )
 
 from .midi import (
+    build_midi_chunk_windows,
     extract_midi_event_chunks,
     extract_midi_placements,
     extract_midi_region_windows,
@@ -397,40 +398,6 @@ def _midi_source_events(
 
 
 
-def build_midi_chunk_windows(data: bytes, top: list):
-    """
-    Pair the known-working MIDI event decoder with the raw MdNLB zero ticks.
-
-    The older working decoder correctly yields note pitch/velocity/duration.
-    _scan_mdnlb_catalogue() is used ONLY for each list's absolute zero tick;
-    its older raw-event interpretation is deliberately ignored.
-    """
-    chunks = extract_midi_event_chunks(data, top)
-    raw = _scan_mdnlb_catalogue(data, top)
-
-    infos = []
-    for i, chunk in enumerate(chunks):
-        if i >= len(raw):
-            break
-
-        zero_rel = int(raw[i]["zero_rel"])
-        if chunk.notes:
-            rel_start = min(n.pos for n in chunk.notes)
-            rel_end = max(n.pos + n.length for n in chunk.notes)
-        else:
-            rel_start = 0
-            rel_end = 0
-
-        infos.append({
-            "index": i,
-            "chunk": chunk,
-            "zero_rel": zero_rel,
-            "abs_start": zero_rel + rel_start,
-            "abs_end": zero_rel + rel_end,
-            "span": max(0, rel_end - rel_start),
-            "count": len(chunk.notes),
-        })
-    return infos
 
 
 def _midi_window_score(region_meta, chunk_info):
@@ -583,70 +550,6 @@ def _safe_pt_string(data: bytes, pos: int):
         return s, end
     except Exception:
         return "", pos
-
-
-def _scan_mdnlb_catalogue(data: bytes, top: list):
-    """
-    Evidence-first MdNLB scanner.
-
-    Unlike the MidiRegionData object used by older converter code, this keeps
-    the raw 5-byte absolute zero tick read immediately after the event count.
-    Layout established from the existing parser:
-        'MdNLB' + 6 bytes
-        u32 event_count
-        u40 zero_tick
-        event records (35 bytes each)
-    """
-    found = []
-    seen_offsets = set()
-
-    for block in _walk_blocks(top):
-        if block[1] != 0x2000:
-            continue
-        bstart = block[3]
-        bend = min(len(data), bstart + block[2])
-        pos = bstart
-        while True:
-            p = data.find(b"MdNLB", pos, bend)
-            if p < 0:
-                break
-            pos = p + 5
-            if p in seen_offsets:
-                continue
-            seen_offsets.add(p)
-
-            q = p + 11
-            if q + 9 > len(data):
-                continue
-
-            count = r4(data, q)
-            zero = r5(data, q + 4)
-
-            # Validate enough bytes exist for the advertised event list.
-            ev0 = q + 9
-            need = ev0 + count * 35
-            if count > 1_000_000 or need > len(data):
-                continue
-
-            notes = []
-            for n in range(count):
-                ep = ev0 + n * 35
-                raw_pos = r5(data, ep)
-                pitch = data[ep + 8]
-                length = r5(data, ep + 9)
-                velocity = data[ep + 17]
-                rel_pos = raw_pos - zero if raw_pos >= zero else raw_pos
-                notes.append((rel_pos, pitch, length, velocity, raw_pos))
-
-            found.append({
-                "index": len(found),
-                "offset": p,
-                "count": count,
-                "zero": zero,
-                "zero_rel": zero - ZERO_TICKS if zero >= ZERO_TICKS else zero,
-                "notes": notes,
-            })
-    return found
 
 
 def resolve_midi_placements_direct(data: bytes, top: list):

@@ -506,3 +506,211 @@ def extract_midi_region_windows(
         }
 
     return result
+
+def _scan_mdnlb_catalogue(
+    data: bytes,
+    top: list,
+):
+    """
+    Evidence-first MdNLB scanner.
+
+    Unlike the MidiRegionData object used by older converter code, this keeps
+    the raw 5-byte absolute zero tick read immediately after the event count.
+
+    Layout established from the existing parser:
+        'MdNLB' + 6 bytes
+        u32 event_count
+        u40 zero_tick
+        event records (35 bytes each)
+    """
+    found = []
+    seen_offsets = set()
+
+    for block in _walk_blocks(top):
+        if block[1] != 0x2000:
+            continue
+
+        block_start = block[3]
+
+        block_end = min(
+            len(data),
+            block_start + block[2],
+        )
+
+        pos = block_start
+
+        while True:
+            p = data.find(
+                b"MdNLB",
+                pos,
+                block_end,
+            )
+
+            if p < 0:
+                break
+
+            pos = p + 5
+
+            if p in seen_offsets:
+                continue
+
+            seen_offsets.add(p)
+
+            q = p + 11
+
+            if q + 9 > len(data):
+                continue
+
+            count = r4(
+                data,
+                q,
+            )
+
+            zero = r5(
+                data,
+                q + 4,
+            )
+
+            # Validate enough bytes exist for the advertised event list.
+            event_start = q + 9
+            required_end = (
+                event_start
+                + count * 35
+            )
+
+            if (
+                count > 1_000_000
+                or required_end > len(data)
+            ):
+                continue
+
+            notes = []
+
+            for note_index in range(count):
+                event_pos = (
+                    event_start
+                    + note_index * 35
+                )
+
+                raw_pos = r5(
+                    data,
+                    event_pos,
+                )
+
+                pitch = data[
+                    event_pos + 8
+                ]
+
+                length = r5(
+                    data,
+                    event_pos + 9,
+                )
+
+                velocity = data[
+                    event_pos + 17
+                ]
+
+                relative_pos = (
+                    raw_pos - zero
+                    if raw_pos >= zero
+                    else raw_pos
+                )
+
+                notes.append(
+                    (
+                        relative_pos,
+                        pitch,
+                        length,
+                        velocity,
+                        raw_pos,
+                    )
+                )
+
+            found.append(
+                {
+                    "index": len(found),
+                    "offset": p,
+                    "count": count,
+                    "zero": zero,
+                    "zero_rel": (
+                        zero - ZERO_TICKS
+                        if zero >= ZERO_TICKS
+                        else zero
+                    ),
+                    "notes": notes,
+                }
+            )
+
+    return found
+
+def build_midi_chunk_windows(
+    data: bytes,
+    top: list,
+):
+    """
+    Pair the known-working MIDI event decoder with the raw MdNLB zero ticks.
+
+    The older working decoder correctly yields note pitch/velocity/duration.
+    _scan_mdnlb_catalogue() is used ONLY for each list's absolute zero tick;
+    its older raw-event interpretation is deliberately ignored.
+    """
+    chunks = extract_midi_event_chunks(
+        data,
+        top,
+    )
+
+    raw = _scan_mdnlb_catalogue(
+        data,
+        top,
+    )
+
+    infos = []
+
+    for index, chunk in enumerate(chunks):
+        if index >= len(raw):
+            break
+
+        zero_relative = int(
+            raw[index]["zero_rel"]
+        )
+
+        if chunk.notes:
+            relative_start = min(
+                note.pos
+                for note in chunk.notes
+            )
+
+            relative_end = max(
+                note.pos + note.length
+                for note in chunk.notes
+            )
+
+        else:
+            relative_start = 0
+            relative_end = 0
+
+        infos.append(
+            {
+                "index": index,
+                "chunk": chunk,
+                "zero_rel": zero_relative,
+                "abs_start": (
+                    zero_relative
+                    + relative_start
+                ),
+                "abs_end": (
+                    zero_relative
+                    + relative_end
+                ),
+                "span": max(
+                    0,
+                    relative_end
+                    - relative_start,
+                ),
+                "count": len(
+                    chunk.notes
+                ),
+            }
+        )
+
+    return infos

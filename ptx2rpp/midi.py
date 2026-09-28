@@ -1,16 +1,31 @@
 """Pro Tools MIDI parsing and placement resolution."""
 
-from typing import List
+from typing import Dict, List, Tuple
 
-from .models import MidiNote, MidiRegionData
+from .models import MidiNote, MidiPlacement, MidiRegionData
 from .ptx import r4, r5
-
+from .audio import read_pt_string
+from .timing import ZERO_TICKS
 
 def _walk_blocks(blocks):
     """Yield every parsed PTX block recursively."""
     for block in blocks:
         yield block
         yield from _walk_blocks(block[4])
+
+def _safe_pt_string(
+    data: bytes,
+    pos: int,
+):
+    try:
+        value, end = read_pt_string(
+            data,
+            pos,
+        )
+        return value, end
+
+    except Exception:
+        return "", pos
 
 
 def extract_midi_event_chunks(
@@ -126,3 +141,112 @@ def extract_midi_event_chunks(
             )
 
     return chunks
+
+def extract_midi_placements(
+    data: bytes,
+    top: list,
+) -> Tuple[Dict[str, List[MidiPlacement]], int]:
+    """
+    Decode the active 0x1058 -> 0x1057 -> 0x1056 -> 0x104F MIDI playlist map.
+
+    Some PTX sessions repeat the same complete MIDI placement map many times.
+    Greyscale contains 188 copies of each logical MIDI placement. These are
+    structurally identical references, not 188 intentional stacked clips.
+
+    Collapse only exact duplicates on the same PT track:
+        (track_name, region_index, timeline_ticks)
+
+    This is deliberately conservative: different regions or different timeline
+    positions remain separate even when their note data happens to match.
+    """
+    result = {}
+    seen_by_track = {}
+    duplicate_refs_skipped = 0
+
+    all_blocks = list(
+        _walk_blocks(top)
+    )
+
+    for midi_block in [
+        block
+        for block in all_blocks
+        if block[1] == 0x1058
+    ]:
+        for track_block in [
+            child
+            for child in midi_block[4]
+            if child[1] == 0x1057
+        ]:
+            track_name, _ = _safe_pt_string(
+                data,
+                track_block[3] + 2,
+            )
+
+            if not track_name:
+                continue
+
+            output = result.setdefault(
+                track_name,
+                [],
+            )
+
+            seen = seen_by_track.setdefault(
+                track_name,
+                set(),
+            )
+
+            for playlist_block in track_block[4]:
+                if playlist_block[1] != 0x1056:
+                    continue
+
+                for region_ref in playlist_block[4]:
+                    if region_ref[1] != 0x104F:
+                        continue
+
+                    j = region_ref[3] + 4
+
+                    if j + 10 > len(data):
+                        continue
+
+                    region_index = r4(
+                        data,
+                        j,
+                    )
+
+                    raw_start = r5(
+                        data,
+                        j + 5,
+                    )
+
+                    timeline = (
+                        raw_start - ZERO_TICKS
+                    )
+
+                    if timeline < 0:
+                        timeline = -timeline
+
+                    identity = (
+                        region_index,
+                        timeline,
+                    )
+
+                    if identity in seen:
+                        duplicate_refs_skipped += 1
+                        continue
+
+                    seen.add(identity)
+
+                    output.append(
+                        MidiPlacement(
+                            track_name,
+                            region_index,
+                            timeline,
+                        )
+                    )
+
+    for placements in result.values():
+        placements.sort(
+            key=lambda placement: placement.timeline_ticks
+        )
+
+    return result, duplicate_refs_skipped

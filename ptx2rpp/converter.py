@@ -92,7 +92,10 @@ from .audio import (
     build_playlist_lane_groups,
 )
 
-from .midi import extract_midi_event_chunks
+from .midi import (
+    extract_midi_event_chunks,
+    extract_midi_placements,
+)
 
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
@@ -285,69 +288,6 @@ def extract_session_timecode_origin_samples(
         f"TC40 correction disabled for safety"
     )
     return None, frame_rate_enum, origin_frames
-
-
-def extract_midi_placements(
-    data: bytes,
-    top: list,
-) -> Tuple[Dict[str, List[MidiPlacement]], int]:
-    """
-    Decode the active 0x1058 -> 0x1057 -> 0x1056 -> 0x104F MIDI playlist map.
-
-    Some PTX sessions repeat the same complete MIDI placement map many times.
-    Greyscale contains 188 copies of each logical MIDI placement.  These are
-    structurally identical references, not 188 intentional stacked clips.
-
-    Collapse only exact duplicates on the same PT track:
-        (track_name, region_index, timeline_ticks)
-
-    This is deliberately conservative: different regions or different timeline
-    positions remain separate even when their note data happens to match.
-    """
-    result = {}
-    seen_by_track = {}
-    duplicate_refs_skipped = 0
-
-    all_blocks = list(_walk_blocks(top))
-    for mb in [b for b in all_blocks if b[1] == 0x1058]:
-        for c in [x for x in mb[4] if x[1] == 0x1057]:
-            track_name, _ = _safe_pt_string(data, c[3] + 2)
-            if not track_name:
-                continue
-
-            out = result.setdefault(track_name, [])
-            seen = seen_by_track.setdefault(track_name, set())
-
-            for d in c[4]:
-                if d[1] != 0x1056:
-                    continue
-                for e in d[4]:
-                    if e[1] != 0x104F:
-                        continue
-                    j = e[3] + 4
-                    if j + 10 > len(data):
-                        continue
-
-                    region_index = r4(data, j)
-                    raw_start = r5(data, j + 5)
-                    timeline = raw_start - ZERO_TICKS
-                    if timeline < 0:
-                        timeline = -timeline
-
-                    identity = (region_index, timeline)
-                    if identity in seen:
-                        duplicate_refs_skipped += 1
-                        continue
-
-                    seen.add(identity)
-                    out.append(
-                        MidiPlacement(track_name, region_index, timeline)
-                    )
-
-    for ps in result.values():
-        ps.sort(key=lambda p: p.timeline_ticks)
-
-    return result, duplicate_refs_skipped
 
 
 def extract_session_tempo(data: bytes, top: list) -> float:

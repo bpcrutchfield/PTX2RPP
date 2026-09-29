@@ -41,31 +41,17 @@ Options:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-from .models import (
-    AudioTrack,
-    MidiRegionData,
-    PlaylistLaneGroup,
-    Region,
-)
+from typing import List, Optional, Tuple
 
 from .ptx import (
     decrypt_ptx,
-    find_by_ct,
     find_top,
-    parse_three_point,
-    r2,
-    r4,
-    r5,
 )
 from .markers import extract_memory_locations
 
 from .timing import (
-    ZERO_TICKS,
     ptticks_to_seconds,
 )
 
@@ -79,15 +65,9 @@ from .audio import (
     extract_regions,
     match_regions_to_wavs,
     prune_spurious_cross_track_audio,
-    read_pt_string,
 )
 
 from .midi import (
-    build_midi_chunk_windows,
-    extract_midi_event_chunks,
-    extract_midi_placements,
-    extract_midi_region_mdnlb_links,
-    extract_midi_region_windows,
     resolve_midi_placements_direct,
 )
 

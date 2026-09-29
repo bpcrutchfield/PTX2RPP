@@ -45,7 +45,6 @@ import os
 import re
 import struct
 import sys
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from .models import (
@@ -103,6 +102,8 @@ from .midi import (
 from .reaper import (
     _midi_source_events,
     _quote_rpp_string,
+    memory_location_marker_lines,
+    project_header_lines,
     stable_guid,
 )
 
@@ -394,10 +395,11 @@ def write_rpp(
     def clean_name(value: str) -> str:
         return value.replace('"', "'").strip()
 
-    L(f'<REAPER_PROJECT 0.1 "7.0/win64" {int(time.time())}>')
-    L(f"TEMPO {tempo_bpm:.10f} 4 4")
-    L(f"SAMPLERATE {sample_rate} 0 0")
-    L("LOOP 0")
+    for line in project_header_lines(
+        tempo_bpm,
+        sample_rate,
+    ):
+        L(line)
 
     colour_idx = 0
     item_counter = 0
@@ -414,36 +416,11 @@ def write_rpp(
     # ---------------------------------------------------------------
     # Pro Tools Memory Locations -> REAPER project markers
     # ---------------------------------------------------------------
-    used_marker_ids = set()
-    next_marker_id = 1
-
-    for marker in memory_locations or []:
-        requested_id = int(marker.get("index", 0) or 0)
-
-        if requested_id > 0 and requested_id not in used_marker_ids:
-            marker_id = requested_id
-        else:
-            while next_marker_id in used_marker_ids:
-                next_marker_id += 1
-            marker_id = next_marker_id
-
-        used_marker_ids.add(marker_id)
-        next_marker_id = max(next_marker_id, marker_id + 1)
-
-        marker_pos = (
-            float(marker["position_seconds"]) - origin_seconds
-        )
-        marker_name = clean_name(str(marker.get("name", "")))
-        marker_key = (
-            f"PT_MARKER|{marker_id}|{marker_name}|"
-            f"{marker_pos:.12f}"
-        )
-
-        L(
-            f'MARKER {marker_id} {marker_pos:.12f} '
-            f'"{marker_name}" 0 0 1 R '
-            f'{stable_guid(marker_key)} 0'
-        )
+    for line in memory_location_marker_lines(
+        memory_locations,
+        origin_seconds,
+    ):
+        L(line)
 
     playlist_groups = []
     playlist_consumed = set()

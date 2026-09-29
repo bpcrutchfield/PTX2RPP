@@ -41,21 +41,19 @@ Options:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import struct
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
 from .models import (
     AudioTrack,
-    ClipPlacement,
-    MidiNote,
-    MidiPlacement,
     MidiRegionData,
     PlaylistLaneGroup,
     Region,
 )
+
 from .ptx import (
     decrypt_ptx,
     find_by_ct,
@@ -68,10 +66,7 @@ from .ptx import (
 from .markers import extract_memory_locations
 
 from .timing import (
-    PT_MIDI_TICKS_PER_QN,
-    RPP_PPQ,
     ZERO_TICKS,
-    ptticks_to_rpp_ppq,
     ptticks_to_seconds,
 )
 
@@ -86,8 +81,6 @@ from .audio import (
     match_regions_to_wavs,
     prune_spurious_cross_track_audio,
     read_pt_string,
-    heal_short_audio_item_lengths,
-    build_playlist_lane_groups,
 )
 
 from .midi import (

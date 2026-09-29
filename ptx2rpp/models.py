@@ -77,3 +77,51 @@ class ClipPlacement:
         self.timeline_start = timeline_start
         self.raw_start5 = raw_start5
         self.meta = meta
+
+class MidiNote:
+
+    """A decoded Pro Tools MIDI note."""
+
+    __slots__ = ("pos", "note", "length", "velocity")
+
+    def __init__(self, pos, note, length, velocity):
+        self.pos = int(pos)
+        self.note = int(note)
+        self.length = int(length)
+        self.velocity = int(velocity)
+
+
+class MidiRegionData:
+    """Decoded MIDI note data belonging to a Pro Tools MIDI region."""
+
+    __slots__ = ("index", "name", "notes", "length")
+
+    def __init__(self, index, name, notes):
+        self.index = index
+        self.name = name
+        self.notes = notes
+        self.length = max(
+            (n.pos + n.length for n in notes),
+            default=0,
+        )
+
+
+class MidiPlacement:
+    """A timeline placement of a Pro Tools MIDI region."""
+
+    __slots__ = ("track_name", "region_index", "timeline_ticks")
+
+    def __init__(self, track_name, region_index, timeline_ticks):
+        self.track_name = track_name
+        self.region_index = int(region_index)
+        self.timeline_ticks = int(timeline_ticks)
+
+class PlaylistLaneGroup:
+    """A REAPER fixed-lane representation of a Pro Tools playlist family."""
+
+    __slots__ = ("track_name", "lanes")
+
+    def __init__(self, track_name: str):
+        self.track_name = track_name
+        self.lanes = []
+        

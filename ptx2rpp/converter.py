@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import struct
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -94,10 +93,14 @@ from .midi import (
 
 from .reaper import write_rpp
 
+from .session import (
+    detect_session_sample_rate,
+    extract_session_tempo,
+    extract_session_timecode_origin_samples,
+)
+
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
-DEFAULT_SAMPLE_RATE = 44100
-
 
 VERBOSE = False
 
@@ -176,184 +179,6 @@ def resolve_session_input(
     start   = rle(base + offsetbytes + lengthbytes, startbytes)
     return src_off, length, start
 
-
-def extract_session_timecode_origin_samples(
-    data: bytes,
-    top: list,
-    session_rate: int,
-) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-    """Decode the PT session timecode origin from the 0x204D timing block.
-
-    Greyscale proved that the unique 0x204D block stores:
-      content+2  : UInt32 frame-rate enum (0x02 = 25 fps in this session)
-      content+11 : UInt32 session-start frame count
-
-    Important: 0x204D is not always represented in the generic parsed block
-    tree, even though it is present in the decrypted PTX.  Therefore this
-    routine first uses the parsed tree and then falls back to a strict raw
-    block-envelope scan for:
-        5A <bt> <size> 4D 20
-    This is structural scanning, not a search for the numeric value 3600.
-    """
-    blocks = find_by_ct(top, 0x204D)
-
-    content_positions = []
-    for b in blocks:
-        p = b[3]  # points at the two-byte content type
-        if p + 15 <= len(data):
-            content_positions.append(p)
-
-    if not content_positions:
-        # Strict raw fallback.  parse_block() can miss this session-level
-        # timing block because of the surrounding PTX envelope hierarchy.
-        for pos in range(0x14, len(data) - 15):
-            if data[pos] != 0x5A:
-                continue
-            bt = r2(data, pos + 1)
-            bs = r4(data, pos + 3)
-            ct = r2(data, pos + 7)
-            if ct != 0x204D:
-                continue
-            if bt & 0xFF00:
-                continue
-            if bs < 15 or bs > 0x10000:
-                continue
-            block_end = pos + 7 + bs
-            if block_end > len(data):
-                continue
-            content_positions.append(pos + 7)
-
-    # De-duplicate in case parsed + raw discovery both found the same block.
-    content_positions = sorted(set(content_positions))
-
-    if len(content_positions) != 1:
-        debug(
-            f"  Session TC origin: expected one 0x204D, "
-            f"found {len(content_positions)}"
-        )
-        return None, None, None
-
-    p = content_positions[0]
-    frame_rate_enum = r4(data, p + 2)
-    origin_frames = r4(data, p + 11)
-
-    if origin_frames == 0:
-        debug(
-            f"  Session TC origin: enum=0x{frame_rate_enum:02X}, "
-            f"frames=0 -> 0 samples"
-        )
-        return 0, frame_rate_enum, origin_frames
-
-    # Verified from Greyscale:
-    #   enum 0x02 + 90,000 frames = 25 fps * 3,600 s = 01:00:00:00.
-    if frame_rate_enum == 0x02:
-        origin_samples = int(round(origin_frames * session_rate / 25.0))
-        debug(
-            f"  Session TC origin: enum=0x02 (25 fps), "
-            f"frames={origin_frames} -> {origin_samples} samples "
-            f"({origin_samples/session_rate:.6f}s)"
-        )
-        return origin_samples, frame_rate_enum, origin_frames
-
-    # Zero origins are safe above.  For a non-zero origin at an as-yet
-    # unverified enum, leave TC40 correction disabled rather than guessing.
-    debug(
-        f"  Session TC origin: non-zero origin at unverified frame-rate "
-        f"enum=0x{frame_rate_enum:02X}, frames={origin_frames}; "
-        f"TC40 correction disabled for safety"
-    )
-    return None, frame_rate_enum, origin_frames
-
-
-def extract_session_tempo(data: bytes, top: list) -> float:
-    """
-    PTX constant-tempo reader.
-
-    In our known 86 BPM control session the tempo lives in a 0x2028 block,
-    stored as a little-endian IEEE-754 float64.  Prefer candidates from
-    0x2028 blocks that also contain PT tempo-map markers such as TMS/Const.
-    """
-    import struct
-
-    candidates = []
-    for b in _walk_blocks(top):
-        if b[1] != 0x2028:
-            continue
-        start = b[3]
-        end = min(len(data), start + b[2])
-        raw = data[start:end]
-        marker_score = 0
-        if b"TMS" in raw:
-            marker_score += 2
-        if b"Const" in raw:
-            marker_score += 2
-
-        # Search every byte offset because PT structures are not guaranteed
-        # to align doubles on an 8-byte boundary.
-        for off in range(start, max(start, end - 7)):
-            try:
-                bpm = struct.unpack_from("<d", data, off)[0]
-            except struct.error:
-                continue
-            if 20.0 <= bpm <= 300.0 and bpm == bpm:
-                # Strongly prefer ordinary DAW tempo precision.
-                precision_score = 2 if abs(bpm - round(bpm, 6)) < 1e-8 else 0
-                # 48000 etc. are excluded by the BPM range.
-                candidates.append(
-                    (marker_score + precision_score, bpm, b[3], off)
-                )
-
-    if not candidates:
-        debug("  [tempo] No 0x2028 tempo candidate found; falling back to 120 BPM.")
-        return 120.0
-
-    # Group identical/near-identical values. Duplicated PT tempo-map structures
-    # are common, so repetition is positive evidence.
-    grouped = {}
-    for score, bpm, block_off, value_off in candidates:
-        key = round(bpm, 6)
-        g = grouped.setdefault(key, {"score": 0, "hits": []})
-        g["score"] += score
-        g["hits"].append((block_off, value_off))
-
-    ranked = sorted(
-        grouped.items(),
-        key=lambda kv: (kv[1]["score"], len(kv[1]["hits"])),
-        reverse=True,
-    )
-
-    bpm, info = ranked[0]
-    debug(
-        f"  [tempo] Detected constant tempo: {bpm:.6f} BPM "
-        f"({len(info['hits'])} matching 0x2028 candidate(s))"
-    )
-    for block_off, value_off in info["hits"][:4]:
-        debug(
-            f"          block=0x{block_off:08X} value=0x{value_off:08X}"
-        )
-    return float(bpm)
-
-
-
-
-
-def _walk_blocks(blocks):
-    for b in blocks:
-        yield b
-        yield from _walk_blocks(b[4])
-
-
-
-
-
-def detect_session_sample_rate(data: bytes, top: list) -> int:
-    sample_rate = DEFAULT_SAMPLE_RATE
-    for block in find_by_ct(top, 0x1028):
-        if block[3] + 8 <= len(data):
-            candidate = r4(data, block[3] + 4)
-            if 8000 <= candidate <= 768000:
-                sample_rate = candidate
-    return sample_rate
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -470,9 +295,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             verbose=VERBOSE,
         )
         session_tc_origin_samples, session_tc_rate_enum, session_tc_origin_frames = (
-            extract_session_timecode_origin_samples(data, top, sample_rate)
+            extract_session_timecode_origin_samples(
+                data,
+                top,
+                sample_rate,
+                debug_fn=debug,
+            )
         )
-
         (
             audio_track_map,
             inactive_audio_skipped,
@@ -525,7 +354,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for placement in placements
             ]
             if midi_starts:
-                tempo_for_origin = extract_session_tempo(data, top)
+                tempo_for_origin = extract_session_tempo(
+                data,
+                top,
+                debug_fn=debug,
+                )
                 origin_seconds = ptticks_to_seconds(
                     min(midi_starts),
                     tempo_for_origin,
@@ -536,7 +369,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 session_start_samples = 0
 
-        tempo_bpm = extract_session_tempo(data, top)
+        tempo_bpm = extract_session_tempo(
+            data,
+            top,
+            debug_fn=debug,
+            )
 
         # ── Memory Locations / markers ─────────────────────────────────────
         memory_locations = extract_memory_locations(

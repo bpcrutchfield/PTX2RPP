@@ -41,7 +41,6 @@ Options:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import struct
@@ -101,6 +100,12 @@ from .midi import (
     resolve_midi_placements_direct,
 )
 
+from .reaper import (
+    _midi_source_events,
+    _quote_rpp_string,
+    stable_guid,
+)
+
 APP_NAME = "PTX2RPP"
 APP_VERSION = "1.2.0-memory-locations"
 DEFAULT_SAMPLE_RATE = 44100
@@ -118,23 +123,6 @@ def debug(*args, **kwargs) -> None:
     if VERBOSE:
         print(*args, **kwargs)
 
-
-def stable_guid(key: str) -> str:
-    """Generate a deterministic REAPER-style GUID from a stable text key."""
-    digest = hashlib.md5(key.encode("utf-8", "replace")).hexdigest()
-    return (
-        "{"
-        + digest[0:8]
-        + "-"
-        + digest[8:12]
-        + "-"
-        + digest[12:16]
-        + "-"
-        + digest[16:20]
-        + "-"
-        + digest[20:32]
-        + "}"
-    ).upper()
 
 
 def resolve_session_input(
@@ -365,38 +353,6 @@ def extract_session_tempo(data: bytes, top: list) -> float:
 
 
 
-def _midi_source_events(
-    notes: List[MidiNote],
-    source_end_ppq: Optional[int] = None,
-):
-    """Serialize MIDI events and, when known, terminate the MIDI source.
-
-    REAPER-created MIDI sources include a final CC123 (all notes off) event at
-    the source boundary.  Supplying it makes the source's own length explicit
-    instead of leaving REAPER to infer the source boundary from the last note.
-    """
-    events = []
-    for n in notes:
-        start = ptticks_to_rpp_ppq(n.pos)
-        end = ptticks_to_rpp_ppq(n.pos + n.length)
-        vel = max(1, min(127, n.velocity))
-        pitch = max(0, min(127, n.note))
-        events.append((start, 0x90, pitch, vel, 1))
-        events.append((end, 0x80, pitch, 0, 0))
-
-    events.sort(key=lambda x: (x[0], x[4]))
-    last = 0
-    out = []
-    for ppq, status, d1, d2, _ in events:
-        delta = max(0, ppq - last)
-        out.append(f"E {delta} {status:02x} {d1:02x} {d2:02x}")
-        last = ppq
-
-    if source_end_ppq is not None:
-        source_end_ppq = max(last, int(source_end_ppq))
-        out.append(f"E {source_end_ppq - last} b0 7b 00")
-
-    return out
 
 def _walk_blocks(blocks):
     for b in blocks:
@@ -404,8 +360,6 @@ def _walk_blocks(blocks):
         yield from _walk_blocks(b[4])
 
 
-def _quote_rpp_string(value: str) -> str:
-    return '"' + value.replace('"', "'") + '"'
 
 
 

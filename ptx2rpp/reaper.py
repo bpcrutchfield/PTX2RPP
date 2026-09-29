@@ -224,3 +224,10 @@ def _midi_source_events(
         )
 
     return output
+
+def samples_to_seconds(
+    samples: int,
+    sample_rate: int,
+) -> float:
+    """Convert an audio sample position or length to seconds."""
+    return samples / sample_rate

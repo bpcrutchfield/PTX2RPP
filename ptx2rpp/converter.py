@@ -104,6 +104,7 @@ from .reaper import (
     _quote_rpp_string,
     memory_location_marker_lines,
     project_header_lines,
+    samples_to_seconds,
     stable_guid,
 )
 
@@ -360,12 +361,6 @@ def _walk_blocks(blocks):
         yield b
         yield from _walk_blocks(b[4])
 
-
-
-
-
-def samples_to_seconds(n: int, rate: int = DEFAULT_SAMPLE_RATE) -> float:
-    return n / rate
 
 
 def write_rpp(

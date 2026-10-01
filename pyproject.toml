@@ -7,6 +7,7 @@ name = "ptx2rpp"
 dynamic = ["version"]
 description = "Convert Pro Tools PTX sessions to REAPER RPP projects."
 requires-python = ">=3.10"
+license = "MIT"
 
 [project.scripts]
 ptx2rpp = "ptx2rpp.converter:main"

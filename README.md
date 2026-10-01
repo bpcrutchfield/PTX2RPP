@@ -335,6 +335,14 @@ More PTX session variants still need testing, so feedback and reproducible test 
 
 ---
 
+## License
+
+PTX2RPP is released under the MIT License.
+
+See [LICENSE](LICENSE) for details.
+
+---
+
 ## Disclaimer
 
 PTX2RPP is an independent project and is not affiliated with, endorsed by, or supported by Avid or Cockos.

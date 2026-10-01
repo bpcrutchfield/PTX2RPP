@@ -39,6 +39,7 @@ Options:
 """
 
 from __future__ import annotations
+from . import __version__
 
 import argparse
 import sys
@@ -166,6 +167,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         prog="ptx_to_reaper.py",
         description="Convert a Pro Tools .ptx session to a REAPER .rpp project.",
     )
+
+    parser.add_argument(
+    "--version",
+    action="version",
+    version=f"%(prog)s {__version__}",
+    )
+       
     parser.add_argument(
         "input",
         nargs="?",

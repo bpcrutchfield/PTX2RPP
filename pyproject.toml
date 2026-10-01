@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ptx2rpp"
+dynamic = ["version"]
+description = "Convert Pro Tools PTX sessions to REAPER RPP projects."
+requires-python = ">=3.10"
+
+[project.scripts]
+ptx2rpp = "ptx2rpp.converter:main"
+
+[tool.setuptools]
+packages = ["ptx2rpp"]
+
+[tool.setuptools.dynamic]
+version = {attr = "ptx2rpp.__version__"}

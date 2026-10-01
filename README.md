@@ -2,6 +2,8 @@
 
 **Convert Pro Tools `.ptx` sessions into REAPER `.rpp` projects.**
 
+**Latest release: [PTX2RPP v1.2.0](https://github.com/bpcrutchfield/PTX2RPP/releases/tag/v1.2.0)**
+
 PTX2RPP is an open-source command-line tool for transferring session data from Avid Pro Tools to REAPER.
 
 The aim is not to reproduce an entire Pro Tools session exactly, but to recover as much useful project structure as possible — including audio edits, MIDI, markers, timing information and playlists — so that a session can be opened and continued in REAPER.
@@ -74,25 +76,69 @@ PTX2RPP does **not** require Pro Tools to perform the conversion.
 
 ## Installation
 
-PTX2RPP is currently installed directly from the source repository.
+PTX2RPP requires **Python 3.10 or newer**.
+
+### Install the latest release
+
+Download:
+
+**`ptx2rpp-1.2.0-py3-none-any.whl`**
+
+from the [PTX2RPP v1.2.0 release](https://github.com/bpcrutchfield/PTX2RPP/releases/tag/v1.2.0).
+
+Open a terminal in the folder containing the downloaded file and run:
+
+```bash
+python -m pip install ptx2rpp-1.2.0-py3-none-any.whl
+```
+
+Check that PTX2RPP is installed:
+
+```bash
+python -m ptx2rpp --version
+```
+
+You can then convert a session with:
+
+```bash
+python -m ptx2rpp "/path/to/My Session"
+```
+
+On Windows, for example:
+
+```powershell
+python -m ptx2rpp "C:\Sessions\My Song"
+```
+
+Depending on your Python installation, the shorter `ptx2rpp` command may also be available:
+
+```bash
+ptx2rpp --version
+```
+
+If your system reports that `ptx2rpp` is not recognised as a command, use `python -m ptx2rpp` instead.
+
+### Install from source
+
+Developers and contributors can install the current source version directly from the repository.
 
 Clone the repository:
 
 ```bash
-ggit clone https://github.com/bpcrutchfield/PTX2RPP.git
+git clone https://github.com/bpcrutchfield/PTX2RPP.git
 cd PTX2RPP
 ```
 
 Create a virtual environment:
 
-### Windows PowerShell
+#### Windows PowerShell
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-### macOS / Linux
+#### macOS / Linux
 
 ```bash
 python3 -m venv .venv
@@ -105,16 +151,16 @@ Install PTX2RPP:
 python -m pip install -e .
 ```
 
-You can then check the installation with:
+For development, including the test dependencies:
 
 ```bash
-ptx2rpp --help
+python -m pip install -e ".[dev]"
 ```
 
-and:
+Run the test suite with:
 
 ```bash
-ptx2rpp --version
+python -m pytest
 ```
 
 ---
@@ -124,13 +170,13 @@ ptx2rpp --version
 Convert a Pro Tools session by supplying either the `.ptx` file itself:
 
 ```bash
-ptx2rpp "/path/to/My Session.ptx"
+python -m ptx2rpp "/path/to/My Session.ptx"
 ```
 
 or the Pro Tools session directory:
 
 ```bash
-ptx2rpp "/path/to/My Session"
+python -m ptx2rpp "/path/to/My Session"
 ```
 
 PTX2RPP will create a `.rpp` project alongside the source session unless another output location is specified.

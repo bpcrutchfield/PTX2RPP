@@ -74,264 +74,37 @@ PTX2RPP does **not** require Pro Tools to perform the conversion.
 
 ---
 
-## Installation
+### Installation
 
-PTX2RPP requires **Python 3.10 or newer**.
+Download `ptx2rpp-1.2.0-py3-none-any.whl` from the release assets below.
 
-### Install the latest release
-
-Download:
-
-**`ptx2rpp-1.2.0-py3-none-any.whl`**
-
-from the [PTX2RPP v1.2.0 release](https://github.com/bpcrutchfield/PTX2RPP/releases/tag/v1.2.0).
-
-Open a terminal in the folder containing the downloaded file and run:
+Install it with:
 
 ```bash
 python -m pip install ptx2rpp-1.2.0-py3-none-any.whl
 ```
 
-Check that PTX2RPP is installed:
+Then run:
 
 ```bash
-python -m ptx2rpp --version
+python -m ptx2rpp "path/to/session"
 ```
 
-You can then convert a session with:
+For edited sessions with playlists:
 
 ```bash
-python -m ptx2rpp "/path/to/My Session"
+python -m ptx2rpp "path/to/session" --max-gap-heal-ms 1000 --playlists-to-lanes
 ```
 
-On Windows, for example:
+See the README for complete installation instructions, options and current limitations.
 
-```powershell
-python -m ptx2rpp "C:\Sessions\My Song"
-```
+### Current limitations
 
-Depending on your Python installation, the shorter `ptx2rpp` command may also be available:
+Plugins, sends, routing, automation, fades, mixer state and tempo-map changes are not currently converted.
 
-```bash
-ptx2rpp --version
-```
+Stereo Pro Tools audio channels are currently represented as separate mono REAPER tracks.
 
-If your system reports that `ptx2rpp` is not recognised as a command, use `python -m ptx2rpp` instead.
-
-### Install from source
-
-Developers and contributors can install the current source version directly from the repository.
-
-Clone the repository:
-
-```bash
-git clone https://github.com/bpcrutchfield/PTX2RPP.git
-cd PTX2RPP
-```
-
-Create a virtual environment:
-
-#### Windows PowerShell
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-#### macOS / Linux
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Install PTX2RPP:
-
-```bash
-python -m pip install -e .
-```
-
-For development, including the test dependencies:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
-Run the test suite with:
-
-```bash
-python -m pytest
-```
-
----
-
-## Basic usage
-
-Convert a Pro Tools session by supplying either the `.ptx` file itself:
-
-```bash
-python -m ptx2rpp "/path/to/My Session.ptx"
-```
-
-or the Pro Tools session directory:
-
-```bash
-python -m ptx2rpp "/path/to/My Session"
-```
-
-PTX2RPP will create a `.rpp` project alongside the source session unless another output location is specified.
-
-Paths containing spaces should be placed inside quotes.
-
----
-
-## Example
-
-On Windows:
-
-```powershell
-ptx2rpp "C:\Sessions\My Song"
-```
-
-With playlist conversion and audio gap healing enabled:
-
-```powershell
-ptx2rpp "C:\Sessions\My Song" --max-gap-heal-ms 1000 --playlists-to-lanes
-```
-
-Specify a different output file:
-
-```powershell
-ptx2rpp "C:\Sessions\My Song" --output "C:\REAPER Projects\My Song.rpp"
-```
-
----
-
-## Command-line options
-
-```text
-ptx2rpp [input] [ptx_name] [options]
-```
-
-### `--output PATH`
-
-Override the output `.rpp` file location.
-
-```bash
-ptx2rpp "My Session" --output "Converted Session.rpp"
-```
-
-### `--audio-dir PATH`
-
-Override the location of the session's audio files.
-
-```bash
-ptx2rpp "My Session.ptx" --audio-dir "/path/to/Audio Files"
-```
-
-### `--playlists-to-lanes`
-
-Attempt to convert detected Pro Tools audio playlists into REAPER fixed item lanes.
-
-```bash
-ptx2rpp "My Session" --playlists-to-lanes
-```
-
-### `--max-gap-heal-ms N`
-
-Extend short audio items to the next edit when the gap is no greater than the specified number of milliseconds and sufficient source media is available.
-
-For example:
-
-```bash
-ptx2rpp "My Session" --max-gap-heal-ms 1000
-```
-
-Use:
-
-```bash
---max-gap-heal-ms 0
-```
-
-to disable gap healing.
-
-The default is 250 ms.
-
-### `--verbose`
-
-Print detailed PTX parser diagnostics.
-
-```bash
-ptx2rpp "My Session" --verbose
-```
-
-This is particularly useful when investigating a session that does not convert correctly.
-
-### `--strict`
-
-Return a failure exit code if active audio or MIDI placements cannot be written.
-
-### `--version`
-
-Display the installed PTX2RPP version.
-
-### `--help`
-
-Display the complete command-line help.
-
----
-
-## Recommended conversion
-
-For sessions containing edited audio and Pro Tools playlists, a useful starting command is:
-
-```bash
-ptx2rpp "My Session" --max-gap-heal-ms 1000 --playlists-to-lanes
-```
-
-After conversion, open the generated `.rpp` file in REAPER and verify the project against the original Pro Tools session.
-
----
-
-## Audio files
-
-PTX2RPP does not duplicate your audio.
-
-The generated REAPER project references the existing source media associated with the Pro Tools session.
-
-For the most reliable conversion, keep the original Pro Tools session folder structure intact, including its audio files.
-
-If the audio is stored elsewhere, use:
-
-```bash
---audio-dir "/path/to/audio"
-```
-
----
-
-## Pro Tools playlists
-
-PTX2RPP can experimentally translate detected Pro Tools audio playlist families into REAPER fixed item lanes.
-
-Enable this with:
-
-```bash
---playlists-to-lanes
-```
-
-The active Pro Tools playlist is retained as the active lane, while detected alternate playlists are represented as additional lanes where possible.
-
-Playlist detection is still considered experimental and may not behave correctly with every PTX session.
-
----
-
-## Memory Locations
-
-Point-based Pro Tools Memory Locations are imported as REAPER project markers where they can be identified from the PTX session.
-
-Not every type of Pro Tools Memory Location is currently supported.
-
----
+PTX is a proprietary format and session structures may differ between Pro Tools versions, so converted projects should always be checked against the original session.
 
 ## Reporting problems
 

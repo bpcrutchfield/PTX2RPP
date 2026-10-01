@@ -6,8 +6,25 @@ build-backend = "setuptools.build_meta"
 name = "ptx2rpp"
 dynamic = ["version"]
 description = "Convert Pro Tools PTX sessions to REAPER RPP projects."
+readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+authors = [
+    {name = "Benjamin Casey"},
+]
+keywords = [
+    "pro-tools",
+    "reaper",
+    "ptx",
+    "rpp",
+    "audio",
+    "daw",
+]
+
+[project.urls]
+Homepage = "https://github.com/bpcrutchfield/PTX2RPP"
+Repository = "https://github.com/bpcrutchfield/PTX2RPP"
+Issues = "https://github.com/bpcrutchfield/PTX2RPP/issues"
 
 [project.scripts]
 ptx2rpp = "ptx2rpp.converter:main"
@@ -15,6 +32,7 @@ ptx2rpp = "ptx2rpp.converter:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+    "build>=1",
 ]
 
 [tool.setuptools]

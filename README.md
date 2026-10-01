@@ -79,7 +79,7 @@ PTX2RPP is currently installed directly from the source repository.
 Clone the repository:
 
 ```bash
-git clone <repository-url>
+ggit clone https://github.com/bpcrutchfield/PTX2RPP.git
 cd PTX2RPP
 ```
 

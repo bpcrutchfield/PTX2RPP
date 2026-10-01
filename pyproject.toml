@@ -12,6 +12,11 @@ license = "MIT"
 [project.scripts]
 ptx2rpp = "ptx2rpp.converter:main"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
 [tool.setuptools]
 packages = ["ptx2rpp"]
 

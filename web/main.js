@@ -1,3 +1,4 @@
+/* PTX2RPP Web UI — presentation refresh only; conversion worker is unchanged. */
 const $ = id => document.getElementById(id);
 const ptxInput = $('ptxInput');
 const audioInput = $('audioInput');
@@ -5,6 +6,7 @@ const dropzone = $('dropzone');
 const convertBtn = $('convertBtn');
 const statusText = $('statusText');
 const progressBar = $('progressBar');
+const progressTrack = $('progressTrack');
 const results = $('results');
 const errorBox = $('errorBox');
 const logBox = $('logBox');
@@ -12,48 +14,72 @@ let selectedPtx = null;
 let converting = false;
 const worker = new Worker('./worker.js');
 
-function setStatus(text, progress) {
-  statusText.textContent = text;
-  if (progress != null) progressBar.style.width = `${Math.round(progress * 100)}%`;
-}
-function setError(message) {
-  errorBox.textContent = message;
-  errorBox.hidden = false;
-  setStatus('Conversion stopped.', 0);
-  converting = false;
-  convertBtn.disabled = !selectedPtx;
-}
-function selectPtx(file) {
-  if (!file) return;
-  if (!/\.ptx$/i.test(file.name)) return setError('Please choose a Pro Tools .ptx file.');
-  if (file.size > 128 * 1024 * 1024) return setError('This prototype supports PTX files up to 128 MB.');
-  selectedPtx = file;
-  $('selectedFile').textContent = `${file.name} · ${formatBytes(file.size)}`;
-  $('selectedFile').hidden = false;
-  errorBox.hidden = true;
-  results.hidden = true;
-  convertBtn.disabled = converting;
-  setStatus('Session selected. Ready to convert.', 0);
-}
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 ** 2)).toFixed(1)} MB`;
 }
+function setStatus(message, progress = null) {
+  statusText.textContent = message;
+  if (progress != null) {
+    const percentage = Math.max(0, Math.min(100, Math.round(progress * 100)));
+    progressBar.style.width = `${percentage}%`;
+    progressTrack.setAttribute('aria-valuenow', String(percentage));
+    $('progressPercent').textContent = `${percentage}%`;
+  }
+}
+function setError(message) {
+  errorBox.textContent = message;
+  errorBox.hidden = false;
+  $('statusLabel').textContent = 'NEEDS ATTENTION';
+  setStatus('Conversion stopped.', 0);
+  converting = false;
+  convertBtn.disabled = !selectedPtx;
+  convertBtn.querySelector('span:first-child').textContent = 'Convert to REAPER';
+}
+function selectPtx(file) {
+  if (converting || !file) return;
+  if (!/\.ptx$/i.test(file.name)) return setError('Please choose a Pro Tools .ptx file.');
+  if (file.size > 128 * 1024 * 1024) return setError('PTX files must be 128 MB or smaller.');
+  selectedPtx = file;
+  $('selectedFileName').textContent = file.name;
+  $('selectedFileSize').textContent = formatBytes(file.size);
+  $('selectedFile').hidden = false;
+  errorBox.hidden = true;
+  results.hidden = true;
+  $('metadataWarning').hidden = true;
+  convertBtn.disabled = false;
+  $('statusLabel').textContent = 'READY TO CONVERT';
+  setStatus('Session selected. You can start the conversion.', 0);
+}
 ptxInput.addEventListener('change', () => selectPtx(ptxInput.files[0]));
-for (const eventName of ['dragenter', 'dragover']) {
-  dropzone.addEventListener(eventName, event => { event.preventDefault(); dropzone.classList.add('dragging'); });
+for (const name of ['dragenter', 'dragover']) {
+  dropzone.addEventListener(name, event => {
+    event.preventDefault();
+    if (!converting) dropzone.classList.add('dragging');
+  });
 }
-for (const eventName of ['dragleave', 'drop']) {
-  dropzone.addEventListener(eventName, event => { event.preventDefault(); dropzone.classList.remove('dragging'); });
+for (const name of ['dragleave', 'drop']) {
+  dropzone.addEventListener(name, event => {
+    event.preventDefault();
+    dropzone.classList.remove('dragging');
+  });
 }
-dropzone.addEventListener('drop', event => selectPtx([...event.dataTransfer.files].find(file => /\.ptx$/i.test(file.name))));
+dropzone.addEventListener('drop', event => {
+  if (converting) return;
+  const file = [...event.dataTransfer.files].find(item => /\.ptx$/i.test(item.name));
+  if (file) selectPtx(file);
+  else setError('Drop a Pro Tools .ptx file to continue.');
+});
 audioInput.addEventListener('change', () => {
   const files = [...audioInput.files].filter(file => /\.(wav|aif|aiff)$/i.test(file.name));
-  $('audioSummary').textContent = files.length ? `${files.length} audio files identified (filenames and headers only)` : 'No audio files identified';
+  $('audioSummary').classList.toggle('has-files', files.length > 0);
+  $('audioSummaryText').textContent = files.length
+    ? `${files.length.toLocaleString()} audio files selected (metadata only)`
+    : 'No audio folder selected';
 });
 
-// Read just the first 64 KiB of each WAV, not its actual audio sample data.
+// Read at most the first 64 KiB of each WAV file; never load the audio samples.
 async function wavMetadata(file) {
   if (!/\.wav$/i.test(file.name)) return null;
   const bytes = await file.slice(0, 65536).arrayBuffer();
@@ -79,7 +105,6 @@ async function wavMetadata(file) {
   if (!formatCode || !channels || !rate || !blockAlign || !bits || dataBytes === null || dataBytes === 0xffffffff) return null;
   return { formatCode, channels, rate, bits, frames: Math.floor(dataBytes / blockAlign) };
 }
-
 async function readAudioMetadata() {
   const files = [...audioInput.files].filter(file => /\.(wav|aif|aiff)$/i.test(file.name));
   const entries = [];
@@ -87,7 +112,7 @@ async function readAudioMetadata() {
   const names = new Set();
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    if (names.has(file.name.toLowerCase())) throw new Error(`Duplicate audio filename: ${file.name}. This prototype expects unique filenames.`);
+    if (names.has(file.name.toLowerCase())) throw new Error(`Duplicate audio filename: ${file.name}. This version expects unique filenames.`);
     names.add(file.name.toLowerCase());
     const info = await wavMetadata(file);
     if (!info) missing++;
@@ -99,7 +124,10 @@ async function readAudioMetadata() {
 
 worker.onmessage = event => {
   const msg = event.data;
-  if (msg.type === 'progress') setStatus(msg.message, msg.fraction);
+  if (msg.type === 'progress') {
+    $('statusLabel').textContent = 'CONVERTING LOCALLY';
+    setStatus(msg.message, msg.fraction);
+  }
   if (msg.type === 'error') setError(msg.message);
   if (msg.type === 'result') {
     const blob = new Blob([msg.buffer], { type: 'application/octet-stream' });
@@ -109,12 +137,15 @@ worker.onmessage = event => {
     link.href = url;
     link.dataset.objectUrl = url;
     link.download = msg.filename;
-    $('resultSummary').textContent = `${msg.filename} · ${formatBytes(msg.outputBytes)} · ${msg.audioCount} audio filenames mapped`;
+    $('resultSummary').textContent = `${msg.filename} · ${formatBytes(msg.outputBytes)} · ${Number(msg.audioCount).toLocaleString()} audio filenames indexed`;
     logBox.textContent = msg.log || '(No diagnostic output)';
     results.hidden = false;
     converting = false;
     convertBtn.disabled = false;
-    setStatus('Your REAPER project is ready.', 1);
+    convertBtn.querySelector('span:first-child').textContent = 'Convert again';
+    $('statusLabel').textContent = 'CONVERSION COMPLETE';
+    setStatus('Your REAPER project is ready to download.', 1);
+    results.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
   }
 };
 worker.onerror = event => setError(event.message || 'The conversion worker stopped unexpectedly.');
@@ -123,15 +154,18 @@ convertBtn.addEventListener('click', async () => {
   if (!selectedPtx || converting) return;
   converting = true;
   convertBtn.disabled = true;
+  convertBtn.querySelector('span:first-child').textContent = 'Converting…';
   results.hidden = true;
   errorBox.hidden = true;
+  $('metadataWarning').hidden = true;
+  $('statusLabel').textContent = 'PREPARING FILES';
   try {
     setStatus('Reading session locally…', 0.01);
     const { entries, missing } = await readAudioMetadata();
     if (missing && entries.length) {
       $('metadataWarning').textContent = `${missing} file(s) have no usable WAV metadata. Short-gap healing may be limited for those files.`;
       $('metadataWarning').hidden = false;
-    } else $('metadataWarning').hidden = true;
+    }
     const data = await selectedPtx.arrayBuffer();
     worker.postMessage({
       type: 'convert', name: selectedPtx.name, data, audio: entries,
@@ -139,4 +173,14 @@ convertBtn.addEventListener('click', async () => {
       verbose: $('verbose').checked
     }, [data]);
   } catch (err) { setError(err.message || String(err)); }
+});
+
+$('copyLogBtn').addEventListener('click', async () => {
+  const button = $('copyLogBtn');
+  try {
+    await navigator.clipboard.writeText(logBox.textContent);
+    button.textContent = 'Copied!';
+  } catch {
+    button.textContent = 'Copy unavailable';
+  }
 });

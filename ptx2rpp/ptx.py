@@ -83,18 +83,58 @@ def parse_block(data: bytes, pos: int, parent_end: Optional[int] = None):
 
 
 def find_top(data: bytes) -> list:
-    """Find top-level PTX blocks."""
+    """Find top-level PTX blocks efficiently, preserving the original tuple format."""
+    from functools import lru_cache
+
+    data_length = len(data)
+
+    @lru_cache(maxsize=250000)
+    def parse_at(pos, parent_end=None):
+        if pos >= data_length or data[pos] != 0x5A:
+            return None
+
+        end = parent_end if parent_end is not None else data_length
+        if pos + 9 > end:
+            return None
+
+        bt = r2(data, pos + 1)
+        bs = r4(data, pos + 3)
+        ct = r2(data, pos + 7)
+        if bt & 0xFF00 or bs > 0x4000000:
+            return None
+
+        be = pos + 7 + bs
+        if be > data_length:
+            return None
+
+        children = []
+        cursor = pos + 1
+        limit = pos + bs
+        while cursor < limit:
+            candidate = data.find(b"Z", cursor, limit)
+            if candidate < 0:
+                break
+            child = parse_at(candidate, be)
+            if child:
+                children.append(child)
+                cursor = candidate + child[2] + 7
+            else:
+                cursor = candidate + 1
+
+        return (bt, ct, bs, pos + 7, children)
+
     blocks = []
-    pos = 0x14
-
-    while pos < len(data):
-        block = parse_block(data, pos)
-
+    cursor = 0x14
+    while cursor < data_length:
+        candidate = data.find(b"Z", cursor)
+        if candidate < 0:
+            break
+        block = parse_at(candidate)
         if block:
             blocks.append(block)
-            pos += block[2] + 7
+            cursor = candidate + block[2] + 7
         else:
-            pos += 1
+            cursor = candidate + 1
 
     return blocks
 

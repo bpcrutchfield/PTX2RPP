@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Convert Pro Tools PTX sessions into REAPER projects, privately in your browser.">
+  <title>PTX2RPP Web — Pro Tools to REAPER</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./main.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="PTX2RPP home"><span class="brand-icon">↝</span> PTX<span class="accent">2</span>RPP <span class="brand-web">WEB</span></a>
+      <a class="github" href="https://github.com/bpcrutchfield/PTX2RPP" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+    </header>
+    <main>
+      <div class="eyebrow"><span class="dot"></span> BROWSER PROTOTYPE · v1.2.0 ENGINE</div>
+      <h1>Pro Tools sessions.<br><span>REAPER projects.</span></h1>
+      <p class="intro">Convert a <code>.ptx</code> session to a <code>.rpp</code> project without installing Python. Your session is processed on your device, not uploaded to a conversion server.</p>
+      <div class="workspace">
+        <section class="panel" aria-labelledby="session-title">
+          <div class="section-heading"><span class="number">01</span><h2 id="session-title">Select your session</h2></div>
+          <label class="dropzone" id="dropzone" for="ptxInput">
+            <span class="upload-icon" aria-hidden="true">⇧</span>
+            <strong>Choose or drop a .ptx file</strong>
+            <span>Pro Tools session · up to 128 MB</span>
+            <input type="file" id="ptxInput" accept=".ptx" aria-label="Choose a PTX file">
+          </label>
+          <p id="selectedFile" class="selection" hidden></p>
+          <div class="folder-choice">
+            <label for="audioInput">Original audio folder <span class="optional">recommended</span></label>
+            <p>Select the session folder or its <code>Audio Files</code> folder. Only filenames and small WAV headers are read; audio samples are not copied.</p>
+            <input type="file" id="audioInput" webkitdirectory directory multiple aria-label="Choose an audio folder">
+            <p id="audioSummary" class="subtle">No audio folder selected</p>
+          </div>
+        </section>
+        <section class="panel" aria-labelledby="settings-title">
+          <div class="section-heading"><span class="number">02</span><h2 id="settings-title">Conversion settings</h2></div>
+          <label class="check-row"><input id="playlists" type="checkbox" checked><span><strong>Convert playlists to lanes</strong><small>Experimental REAPER fixed item lanes</small></span></label>
+          <label class="field" for="gapHealing"><span>Audio gap healing</span><select id="gapHealing"><option value="0">Off</option><option value="250" selected>250 ms (default)</option><option value="500">500 ms</option><option value="1000">1000 ms</option></select></label>
+          <label class="check-row"><input id="verbose" type="checkbox"><span><strong>Detailed diagnostics</strong><small>Include additional conversion information</small></span></label>
+          <div class="convert-section"><button id="convertBtn" type="button" disabled>Convert to REAPER project <span aria-hidden="true">→</span></button><div class="progress-track" role="progressbar" aria-label="Conversion progress"><div id="progressBar" class="progress-bar"></div></div><p id="statusText" class="subtle" aria-live="polite">Choose a PTX session to begin.</p></div>
+        </section>
+      </div>
+      <p id="metadataWarning" class="notice" hidden></p>
+      <div id="errorBox" class="error" role="alert" hidden></div>
+      <section id="results" class="result" hidden aria-labelledby="result-title"><div><div class="eyebrow">CONVERSION COMPLETE</div><h2 id="result-title">Your project is ready.</h2><p id="resultSummary"></p><p class="subtle">Save the downloaded .rpp next to your original .ptx file and its Audio Files folder so REAPER can locate the media. Always verify the result against the Pro Tools session.</p></div><a id="downloadLink" class="download" href="#">Download .rpp ↓</a><details><summary>View conversion log</summary><pre id="logBox"></pre></details></section>
+      <div class="privacy"><span class="lock">◇</span><div><strong>Local conversion, by design.</strong><p>The Python runtime and converter code are downloaded from the web. Your selected PTX contents and audio metadata are processed in browser memory. No session data is intentionally sent to a server.</p></div></div>
+      <p class="caveat">Prototype limitations: a browser cannot automatically place the result beside your original session; WAV metadata is used in place of actual audio, so some healing and media-dependent behavior may differ from desktop PTX2RPP. AIFF audio can be matched by name, but its frame count is not read. Tempo maps, plugins, routing and automation are not supported by v1.2.0.</p>
+    </main>
+    <footer><span>PTX2RPP · Open source · MIT License</span><a href="https://github.com/bpcrutchfield/PTX2RPP/releases/tag/v1.2.0" target="_blank" rel="noopener noreferrer">Desktop CLI v1.2.0 ↗</a></footer>
+  </div>
+</body>
+</html>
